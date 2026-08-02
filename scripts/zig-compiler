@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+mode=cc
+case "${0##*/}" in
+  zig-cxx|c++|cxx) mode=c++ ;;
+esac
+
+args=()
+skip_target=0
+target=""
+case "$0" in
+  */x86_64/*) target=x86_64-linux-musl ;;
+  */aarch64/*) target=aarch64-linux-musl ;;
+esac
+for arg in "$@"; do
+  if [[ "${skip_target}" == 1 ]]; then
+    target="${arg/-unknown/}"
+    skip_target=0
+    continue
+  fi
+  case "${arg}" in
+    --target=*|-target=*) target="${arg#*=}"; target="${target/-unknown/}"; continue ;;
+    --target|-target) skip_target=1; continue ;;
+  esac
+  args+=("${arg}")
+done
+
+if [[ -z "${target}" ]]; then
+  # Prefer Docker-saved host compilers, then a sibling wrapper dir (host builds),
+  # then plain system tools — never require root to install into /usr/bin.
+  here="$(cd "$(dirname "$0")" && pwd)"
+  if [[ "${mode}" == c++ ]]; then
+    for host_compiler in \
+      /usr/bin/tt-host-cxx \
+      "${here}/tt-host-cxx" \
+      "$(command -v c++ || true)" \
+      "$(command -v g++ || true)"; do
+      [[ -n "${host_compiler}" && -x "${host_compiler}" ]] || continue
+      exec "${host_compiler}" "${args[@]}"
+    done
+  else
+    for host_compiler in \
+      /usr/bin/tt-host-cc \
+      "${here}/tt-host-cc" \
+      "$(command -v cc || true)" \
+      "$(command -v gcc || true)"; do
+      [[ -n "${host_compiler}" && -x "${host_compiler}" ]] || continue
+      exec "${host_compiler}" "${args[@]}"
+    done
+  fi
+  echo "zig-compiler: no host ${mode} compiler found" >&2
+  exit 1
+fi
+
+exec zig "${mode}" -target "${target}" "${args[@]}"

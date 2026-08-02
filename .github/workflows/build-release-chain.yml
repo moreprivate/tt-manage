@@ -1,0 +1,167 @@
+name: Build release chain
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_runner:
+        description: Runner used by the component builds
+        required: true
+        default: github-hosted
+        type: choice
+        options:
+          - github-hosted
+          - self-hosted
+      delete_existing:
+        description: Replace existing component releases/tags
+        required: true
+        default: false
+        type: boolean
+  schedule:
+    # Saturday 18:00 UTC = 20:00 Europe/Berlin in summer, 19:00 in winter.
+    - cron: '0 18 * * 6'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-release-chain
+  cancel-in-progress: false
+
+env:
+  BUILD_RUNNER: ${{ inputs.build_runner || 'github-hosted' }}
+  DELETE_EXISTING: ${{ inputs.delete_existing || (github.event_name == 'schedule') }}
+
+jobs:
+  server:
+    name: Build server
+    runs-on: ubuntu-24.04
+    timeout-minutes: 1440
+    env:
+      GH_TOKEN: ${{ secrets.CHAIN_TOKEN }}
+    steps:
+      - name: Validate chain token
+        run: test -n "${GH_TOKEN}" || { echo 'CHAIN_TOKEN organization secret is required' >&2; exit 1; }
+      - name: Dispatch server build
+        id: dispatch
+        shell: bash
+        run: |
+          set -euo pipefail
+          started="$(date -u +%s)"
+          gh workflow run 'Build server targets' --repo moreprivate/tt-server \
+            --ref privacy/server-hardening -f "build_runner=${BUILD_RUNNER}" \
+            -f "delete_existing=${DELETE_EXISTING}"
+          for _ in $(seq 1 30); do
+            run_id="$(gh run list --repo moreprivate/tt-server \
+              --workflow 'Build server targets' --branch privacy/server-hardening \
+              --event workflow_dispatch --limit 20 --json databaseId,createdAt |
+              jq -r --argjson started "$started" \
+                '[.[] | select((.createdAt | fromdateiso8601) >= $started)] | sort_by(.createdAt) | last | .databaseId' || true)"
+            if [[ -n "$run_id" && "$run_id" != null ]]; then
+              echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo 'Could not find dispatched server run' >&2
+          exit 1
+      - name: Wait for server build
+        run: gh run watch "${{ steps.dispatch.outputs.run_id }}" --repo moreprivate/tt-server --exit-status
+
+  client:
+    name: Build client
+    needs: server
+    runs-on: ubuntu-24.04
+    timeout-minutes: 1440
+    outputs:
+      release_tag: ${{ steps.release.outputs.release_tag }}
+    env:
+      GH_TOKEN: ${{ secrets.CHAIN_TOKEN }}
+    steps:
+      - name: Validate chain token
+        run: test -n "${GH_TOKEN}" || { echo 'CHAIN_TOKEN organization secret is required' >&2; exit 1; }
+      - name: Dispatch client build
+        id: dispatch
+        shell: bash
+        run: |
+          set -euo pipefail
+          started="$(date -u +%s)"
+          release_started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "release_started=$release_started" >> "$GITHUB_OUTPUT"
+          gh workflow run 'Build client targets' --repo moreprivate/tt-client \
+            --ref privacy/client-hardening -f "build_runner=${BUILD_RUNNER}" \
+            -f "delete_existing=${DELETE_EXISTING}"
+          for _ in $(seq 1 30); do
+            run_id="$(gh run list --repo moreprivate/tt-client \
+              --workflow 'Build client targets' --branch privacy/client-hardening \
+              --event workflow_dispatch --limit 20 --json databaseId,createdAt |
+              jq -r --argjson started "$started" \
+                '[.[] | select((.createdAt | fromdateiso8601) >= $started)] | sort_by(.createdAt) | last | .databaseId' || true)"
+            if [[ -n "$run_id" && "$run_id" != null ]]; then
+              echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo 'Could not find dispatched client run' >&2
+          exit 1
+      - name: Wait for client build and release
+        run: gh run watch "${{ steps.dispatch.outputs.run_id }}" --repo moreprivate/tt-client --exit-status
+      - name: Resolve exact client release
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The client workflow creates its release as its final job. With
+          # replacement enabled, only a release published by this dispatch is
+          # acceptable; never silently select an older release.
+          tag=''
+          for _ in $(seq 1 30); do
+            tag="$(gh api 'repos/moreprivate/tt-client/releases?per_page=20' |
+              jq -r --arg started "${{ steps.dispatch.outputs.release_started }}" \
+                '[.[] | select(.draft == false and .published_at != null and .published_at >= $started)] | sort_by(.published_at) | last | .tag_name' || true)"
+            if [[ -n "$tag" && "$tag" != null ]]; then break; fi
+            sleep 10
+          done
+          case "$tag" in
+            ''|null) echo "No client release was published by the client workflow" >&2; exit 1 ;;
+            *[!A-Za-z0-9._-]*) echo "Invalid client release tag: $tag" >&2; exit 1 ;;
+          esac
+          echo "release_tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Client release: $tag"
+
+  mobile:
+    name: Build mobile
+    needs: client
+    runs-on: ubuntu-24.04
+    timeout-minutes: 1440
+    env:
+      GH_TOKEN: ${{ secrets.CHAIN_TOKEN }}
+    steps:
+      - name: Validate chain token
+        run: test -n "${GH_TOKEN}" || { echo 'CHAIN_TOKEN organization secret is required' >&2; exit 1; }
+      - name: Dispatch mobile build
+        id: dispatch
+        shell: bash
+        run: |
+          set -euo pipefail
+          started="$(date -u +%s)"
+          gh workflow run 'Build mobile targets' --repo moreprivate/tt-mobile \
+            --ref privacy/mobile-hardening -f "build_runner=${BUILD_RUNNER}" \
+            -f "client_release=${{ needs.client.outputs.release_tag }}" \
+            -f "delete_existing=${DELETE_EXISTING}"
+          for _ in $(seq 1 30); do
+            run_id="$(gh run list --repo moreprivate/tt-mobile \
+              --workflow 'Build mobile targets' --branch privacy/mobile-hardening \
+              --event workflow_dispatch --limit 20 --json databaseId,createdAt |
+              jq -r --argjson started "$started" \
+                '[.[] | select((.createdAt | fromdateiso8601) >= $started)] | sort_by(.createdAt) | last | .databaseId' || true)"
+            if [[ -n "$run_id" && "$run_id" != null ]]; then
+              echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo 'Could not find dispatched mobile run' >&2
+          exit 1
+      - name: Wait for mobile build
+        run: gh run watch "${{ steps.dispatch.outputs.run_id }}" --repo moreprivate/tt-mobile --exit-status
