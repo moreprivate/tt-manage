@@ -4,7 +4,7 @@
 # Data lifecycle and copy-paste flows: $0 help
 set -e
 
-VERSION_SCRIPT="0.6.2"
+VERSION_SCRIPT="0.6.3"
 
 # Fixed layout — self-contained (only sibling: tt-server.sh on the VPS).
 TT_DIR="/etc/trusttunnel"
@@ -1791,22 +1791,41 @@ sqm_queue_sections() {
   uci -q show sqm 2>/dev/null | sed -n 's/^sqm\.\([^=]*\)=queue$/\1/p'
 }
 
-# Disable every other enabled sqm queue on the same interface so only
-# sqm.${SQM_UCI_SECTION} owns shaping (avoids 30/35 vs 22/20 dual-apply).
-sqm_disable_other_queues_on_iface() {
+# Ensure only sqm.${SQM_UCI_SECTION} is enabled on iface (script-only ownership).
+# Other queues on the same iface are disabled so LuCI/default sqm.wan cannot win.
+sqm_claim_iface() {
   local iface="$1" sec ifc en disabled=""
   for sec in $(sqm_queue_sections); do
     [ "$sec" = "$SQM_UCI_SECTION" ] && continue
     ifc="$(uci -q get "sqm.${sec}.interface" 2>/dev/null || true)"
-    en="$(uci -q get "sqm.${sec}.enabled" 2>/dev/null || true)"
     [ "$ifc" = "$iface" ] || continue
-    [ "$en" = "1" ] || continue
-    uci set "sqm.${sec}.enabled=0"
-    disabled="${disabled} ${sec}"
+    en="$(uci -q get "sqm.${sec}.enabled" 2>/dev/null || true)"
+    if [ "$en" != "0" ]; then
+      uci set "sqm.${sec}.enabled=0"
+      disabled="${disabled} ${sec}"
+    fi
   done
   if [ -n "$disabled" ]; then
     log "disabled other sqm queue(s) on ${iface}:${disabled}"
   fi
+}
+
+# Fail if more than one enabled queue targets iface (reproducible sole owner).
+sqm_assert_sole_enabled_on_iface() {
+  local iface="$1" sec ifc en n=0 names=""
+  for sec in $(sqm_queue_sections); do
+    ifc="$(uci -q get "sqm.${sec}.interface" 2>/dev/null || true)"
+    en="$(uci -q get "sqm.${sec}.enabled" 2>/dev/null || true)"
+    [ "$ifc" = "$iface" ] || continue
+    [ "$en" = "1" ] || continue
+    n=$((n + 1))
+    names="${names} ${sec}"
+  done
+  if [ "$n" -ne 1 ]; then
+    die "sqm ownership broken on ${iface}: expected 1 enabled queue (sqm.${SQM_UCI_SECTION}), found ${n}:${names}"
+  fi
+  en="$(uci -q get "sqm.${SQM_UCI_SECTION}.enabled" 2>/dev/null || true)"
+  [ "$en" = "1" ] || die "sqm.${SQM_UCI_SECTION} is not enabled after wan-shape"
 }
 
 # Parse CAKE bandwidth from "tc qdisc show" line → Mbit integer (e.g. 22 from 22Mbit).
@@ -1833,10 +1852,10 @@ sqm_ifb_dev_for() {
   return 1
 }
 
-# Verify live CAKE matches configured kbit (allow ±1 Mbit rounding).
+# Verify live CAKE matches configured kbit (allow ±1 Mbit rounding). Returns 0 only if OK.
 sqm_verify_live_rates() {
   local iface="$1" down_kbit="$2" up_kbit="$3"
-  local want_down_m want_up_m live_up live_down ifb line ok=1
+  local want_down_m want_up_m live_up live_down ifb line
   want_down_m=$((down_kbit / 1000))
   want_up_m=$((up_kbit / 1000))
   [ "$want_down_m" -ge 1 ] || want_down_m=1
@@ -1844,37 +1863,33 @@ sqm_verify_live_rates() {
 
   line="$(tc qdisc show dev "$iface" 2>/dev/null | grep -i 'qdisc cake' | head -1 || true)"
   live_up="$(sqm_cake_mbit_from_tc_line "$line")"
-  if [ -z "$live_up" ]; then
-    log "warn: no live cake on ${iface} after start"
+  [ -n "$live_up" ] || {
+    log "live verify failed: no cake on ${iface}"
     return 1
-  fi
+  }
   if [ "$live_up" -lt $((want_up_m - 1)) ] || [ "$live_up" -gt $((want_up_m + 1)) ]; then
-    log "warn: live upload cake ${live_up}Mbit != configured ~${want_up_m}Mbit (${up_kbit}kbit) on ${iface}"
-    ok=0
+    log "live verify failed: upload cake ${live_up}Mbit != ~${want_up_m}Mbit (${up_kbit}kbit) on ${iface}"
+    return 1
   fi
 
   ifb="$(sqm_ifb_dev_for "$iface" 2>/dev/null || true)"
-  if [ -n "$ifb" ]; then
-    line="$(tc qdisc show dev "$ifb" 2>/dev/null | grep -i 'qdisc cake' | head -1 || true)"
-    live_down="$(sqm_cake_mbit_from_tc_line "$line")"
-    if [ -z "$live_down" ]; then
-      log "warn: no live cake on ingress ${ifb}"
-      ok=0
-    elif [ "$live_down" -lt $((want_down_m - 1)) ] || [ "$live_down" -gt $((want_down_m + 1)) ]; then
-      log "warn: live download cake ${live_down}Mbit != configured ~${want_down_m}Mbit (${down_kbit}kbit) on ${ifb}"
-      ok=0
-    fi
-  else
-    log "warn: no ifb cake device for ${iface} ingress"
-    ok=0
+  [ -n "$ifb" ] || {
+    log "live verify failed: no ifb ingress for ${iface}"
+    return 1
+  }
+  line="$(tc qdisc show dev "$ifb" 2>/dev/null | grep -i 'qdisc cake' | head -1 || true)"
+  live_down="$(sqm_cake_mbit_from_tc_line "$line")"
+  [ -n "$live_down" ] || {
+    log "live verify failed: no cake on ${ifb}"
+    return 1
+  }
+  if [ "$live_down" -lt $((want_down_m - 1)) ] || [ "$live_down" -gt $((want_down_m + 1)) ]; then
+    log "live verify failed: download cake ${live_down}Mbit != ~${want_down_m}Mbit (${down_kbit}kbit) on ${ifb}"
+    return 1
   fi
 
-  if [ "$ok" -eq 1 ]; then
-    log "live CAKE matches: download~${want_down_m}Mbit upload~${want_up_m}Mbit on ${iface}"
-    return 0
-  fi
-  log "hint: uci show sqm  # only one enabled queue should target ${iface}"
-  return 1
+  log "live CAKE matches: download~${want_down_m}Mbit upload~${want_up_m}Mbit on ${iface}"
+  return 0
 }
 
 apply_wan_shape_uci() {
@@ -1888,7 +1903,8 @@ apply_wan_shape_uci() {
     /etc/init.d/sqm stop 2>/dev/null || true
   fi
 
-  sqm_disable_other_queues_on_iface "$iface"
+  # Script is sole owner of shaping on this iface (disable LuCI/default sqm.wan etc.).
+  sqm_claim_iface "$iface"
 
   if ! uci -q get "sqm.${SQM_UCI_SECTION}" >/dev/null 2>&1; then
     uci set "sqm.${SQM_UCI_SECTION}=queue"
@@ -1903,11 +1919,18 @@ apply_wan_shape_uci() {
   uci set "sqm.${SQM_UCI_SECTION}.verbosity=5"
   uci set "sqm.${SQM_UCI_SECTION}.qdisc_advanced=0"
   uci commit sqm
+
+  sqm_assert_sole_enabled_on_iface "$iface"
+
   /etc/init.d/sqm enable 2>/dev/null || true
   /etc/init.d/sqm start || die "sqm start failed — check iface ${iface} and rates"
+
+  # Persist only after start so conf never claims rates that are not live.
   wan_shape_save "$iface" "$down" "$up"
   log "WAN CAKE: iface=${iface} download=${down}kbit upload=${up}kbit (piece_of_cake, sqm.${SQM_UCI_SECTION})"
-  sqm_verify_live_rates "$iface" "$down" "$up" || true
+
+  sqm_verify_live_rates "$iface" "$down" "$up" \
+    || die "wan-shape applied but live CAKE rates do not match — see uci show sqm / tc qdisc"
 }
 
 disable_wan_shape() {
@@ -1929,24 +1952,31 @@ disable_wan_shape() {
 
 status_report_wan_shape() {
   local iface="" down="" up="" q="" en="" line live_up live_down ifb sec ifc oen others=""
-  if wan_shape_load; then
-    iface="$IFACE"
-    down="$DOWNLOAD_KBIT"
-    up="$UPLOAD_KBIT"
-    _st_info "configured: iface=${iface} download=${down}kbit upload=${up}kbit"
-  elif uci -q get "sqm.${SQM_UCI_SECTION}" >/dev/null 2>&1; then
+  # Prefer live UCI TT section (script-owned) over conf file alone.
+  en="$(uci -q get "sqm.${SQM_UCI_SECTION}.enabled" 2>/dev/null || true)"
+  if [ "$en" = "1" ]; then
     iface="$(uci -q get "sqm.${SQM_UCI_SECTION}.interface" 2>/dev/null || true)"
     down="$(uci -q get "sqm.${SQM_UCI_SECTION}.download" 2>/dev/null || true)"
     up="$(uci -q get "sqm.${SQM_UCI_SECTION}.upload" 2>/dev/null || true)"
-    en="$(uci -q get "sqm.${SQM_UCI_SECTION}.enabled" 2>/dev/null || true)"
-    _st_info "uci sqm.${SQM_UCI_SECTION}: enabled=${en:-?} iface=${iface:-?} down=${down:-?} up=${up:-?}"
+    _st_info "script-managed sqm.${SQM_UCI_SECTION}: iface=${iface:-?} download=${down:-?}kbit upload=${up:-?}kbit"
+    # Heal conf drift so status/conf stay reproducible.
+    if [ -n "$iface" ] && is_positive_kbit "$down" && is_positive_kbit "$up"; then
+      if ! wan_shape_load 2>/dev/null \
+        || [ "$IFACE" != "$iface" ] || [ "$DOWNLOAD_KBIT" != "$down" ] || [ "$UPLOAD_KBIT" != "$up" ]; then
+        wan_shape_save "$iface" "$down" "$up"
+      fi
+    fi
+  elif wan_shape_load; then
+    iface="$IFACE"
+    down="$DOWNLOAD_KBIT"
+    up="$UPLOAD_KBIT"
+    _st_warn "wan-shape.conf present but sqm.${SQM_UCI_SECTION} not enabled — re-run wan-shape"
   else
-    _st_info "not configured (optional: $0 wan-shape --download KBIT --upload KBIT)"
+    _st_info "not configured (script-only: $0 wan-shape --download KBIT --upload KBIT)"
     return 0
   fi
   [ -n "$iface" ] || return 0
 
-  # Warn if another enabled queue still targets the same iface.
   for sec in $(sqm_queue_sections); do
     [ "$sec" = "$SQM_UCI_SECTION" ] && continue
     ifc="$(uci -q get "sqm.${sec}.interface" 2>/dev/null || true)"
@@ -1954,7 +1984,7 @@ status_report_wan_shape() {
     [ "$ifc" = "$iface" ] && [ "$oen" = "1" ] && others="${others} ${sec}"
   done
   if [ -n "$others" ]; then
-    _st_warn "other enabled sqm on ${iface}:${others} — re-run wan-shape or disable them"
+    _st_fail "other enabled sqm on ${iface}:${others} — run: $0 wan-shape --download ${down} --upload ${up}"
   fi
 
   if command -v tc >/dev/null 2>&1; then
@@ -1971,26 +2001,26 @@ status_report_wan_shape() {
         if [ -n "$live_down" ]; then
           _st_ok "live ingress cake on ${ifb}: ${live_down}Mbit (want download ~$((down / 1000))Mbit)"
         else
-          _st_warn "no cake on ingress ${ifb}"
+          _st_fail "no cake on ingress ${ifb}"
         fi
       else
-        _st_warn "no ifb ingress device for ${iface}"
+        _st_fail "no ifb ingress device for ${iface}"
       fi
-      if [ -n "$live_up" ] && [ -n "$up" ] && is_positive_kbit "$up"; then
+      if [ -n "$live_up" ] && is_positive_kbit "$up"; then
         if [ "$live_up" -lt $((up / 1000 - 1)) ] || [ "$live_up" -gt $((up / 1000 + 1)) ]; then
-          _st_warn "live upload rate does not match configured ${up}kbit"
+          _st_fail "live upload ${live_up}Mbit != configured ${up}kbit — re-run wan-shape"
         fi
       fi
-      if [ -n "$live_down" ] && [ -n "$down" ] && is_positive_kbit "$down"; then
+      if [ -n "$live_down" ] && is_positive_kbit "$down"; then
         if [ "$live_down" -lt $((down / 1000 - 1)) ] || [ "$live_down" -gt $((down / 1000 + 1)) ]; then
-          _st_warn "live download rate does not match configured ${down}kbit"
+          _st_fail "live download ${live_down}Mbit != configured ${down}kbit — re-run wan-shape"
         fi
       fi
     elif [ -n "$q" ]; then
-      _st_warn "live qdisc on ${iface} (no cake):"
+      _st_fail "live qdisc on ${iface} is not cake"
       printf '%s\n' "$q" | sed 's/^/        /'
     else
-      _st_warn "no qdisc on ${iface} (sqm not active?)"
+      _st_fail "no qdisc on ${iface} (sqm not active?) — re-run wan-shape"
     fi
   else
     _st_warn "tc missing; cannot show live qdisc"
@@ -2014,7 +2044,8 @@ cmd_wan_shape() {
   ip link show dev "$iface" >/dev/null 2>&1 \
     || die "wan-shape: interface not found: ${iface}"
   apply_wan_shape_uci "$iface" "$down" "$up"
-  log "tip: set rates to ~85–95% of the real bottleneck (ISP plan or measured VPN bulk), not the larger of the two"
+  log "OK wan-shape sole owner sqm.${SQM_UCI_SECTION} on ${iface} (${down}/${up} kbit)"
+  log "tip: rates ≈ 85–95% of real bottleneck (VPN bulk if tunnel << ISP); re-run this command after rate change"
 }
 
 cmd_wan_shape_disable() {
