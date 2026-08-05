@@ -4,7 +4,7 @@
 # Data lifecycle and copy-paste flows: $0 help
 set -e
 
-VERSION_SCRIPT="0.6.4"
+VERSION_SCRIPT="0.6.5"
 
 # Fixed layout — self-contained (only sibling: tt-server.sh on the VPS).
 TT_DIR="/etc/trusttunnel"
@@ -1547,8 +1547,30 @@ install_dns() {
 }
 
 # --- binary / service ---
+# procd stop sometimes prints this when the service instance is already gone
+# (ubus NOT_FOUND). Harmless if the process actually exits — do not scare users.
+PROCD_UBUS_NOT_FOUND_MSG='Command failed: Not found'
+
+# Run /etc/init.d/trusttunnel <cmd>; drop known procd/ubus noise; keep real errors.
+# stdout/stderr of the init script are filtered; return code is preserved.
+service_init_cmd() {
+  local cmd="$1" out rc=0
+  [ -x "$INIT" ] || {
+    echo "error: init script missing: $INIT" >&2
+    return 1
+  }
+  out="$("$INIT" "$cmd" 2>&1)" || rc=$?
+  if [ -n "$out" ]; then
+    # Drop exact procd/ubus noise; keep any other init messages.
+    printf '%s\n' "$out" | grep -vxF "$PROCD_UBUS_NOT_FOUND_MSG" | while IFS= read -r line || [ -n "$line" ]; do
+      [ -n "$line" ] && echo "$line" >&2
+    done
+  fi
+  return "$rc"
+}
+
 # Stop procd service and ensure no stray process remains (same end state as a
-# successful /etc/init.d/trusttunnel stop). Do not swallow stop failures.
+# successful /etc/init.d/trusttunnel stop). Success = process gone, not init rc.
 service_stop() {
   local i=0
   if [ ! -x "$INIT" ]; then
@@ -1556,11 +1578,8 @@ service_stop() {
     echo "error: cannot stop running client: init script missing: $INIT" >&2
     return 1
   fi
-  if ! "$INIT" stop; then
-    # procd may return non-zero if already stopped; only error if still running.
-    client_running || return 0
-    echo "error: $INIT stop failed while client still running" >&2
-  fi
+  # Filter procd's intermittent "Command failed: Not found" (ubus instance already gone).
+  service_init_cmd stop || true
   i=0
   while client_running && [ "$i" -lt 15 ]; do
     i=$((i + 1))
@@ -1568,17 +1587,20 @@ service_stop() {
   done
   if client_running; then
     log "client still running after stop — sending TERM"
-    # busybox: killall or kill $(pidof)
-    killall -TERM trusttunnel_client 2>/dev/null \
-      || kill -TERM $(pidof trusttunnel_client) 2>/dev/null \
-      || true
+    pids="$(pidof trusttunnel_client 2>/dev/null || true)"
+    if [ -n "$pids" ]; then
+      # shellcheck disable=SC2086
+      kill -TERM $pids 2>/dev/null || true
+    fi
     sleep 2
   fi
   if client_running; then
     log "client still running after TERM — sending KILL"
-    killall -KILL trusttunnel_client 2>/dev/null \
-      || kill -KILL $(pidof trusttunnel_client) 2>/dev/null \
-      || true
+    pids="$(pidof trusttunnel_client 2>/dev/null || true)"
+    if [ -n "$pids" ]; then
+      # shellcheck disable=SC2086
+      kill -KILL $pids 2>/dev/null || true
+    fi
     sleep 1
   fi
   if client_running; then
@@ -1594,7 +1616,13 @@ service_start() {
     return 1
   }
   "$INIT" enable >/dev/null 2>&1 || return 1
-  "$INIT" start || return 1
+  # Same filter as stop (rare on start, but keep restart output calm).
+  if ! service_init_cmd start; then
+    client_running || {
+      echo "error: $INIT start failed" >&2
+      return 1
+    }
+  fi
   # Wait until process is up (procd start can return before instance is ready).
   local i=0
   while ! client_running && [ "$i" -lt 15 ]; do
@@ -1613,22 +1641,18 @@ service_restart() {
   service_start
 }
 
-# Stop+start without changing enablement. Prefer init restart when available so
-# behaviour matches `/etc/init.d/trusttunnel restart` (what operators use).
+# Stop+start without changing enablement (no re-enable).
 service_restart_preserve_enablement() {
   [ -x "$INIT" ] || {
     echo "error: init script missing: $INIT" >&2
     return 1
   }
-  # OpenWrt rc.common restart = stop then start; still force a clean process
-  # death so we never leave a wedged long-lived PID under a new instance.
-  if ! service_stop; then
-    return 1
-  fi
-  # start without re-enable (preserve disabled state if admin had disabled)
-  if ! "$INIT" start; then
-    echo "error: $INIT start failed" >&2
-    return 1
+  service_stop || return 1
+  if ! service_init_cmd start; then
+    client_running || {
+      echo "error: $INIT start failed" >&2
+      return 1
+    }
   fi
   local i=0
   while ! client_running && [ "$i" -lt 15 ]; do
