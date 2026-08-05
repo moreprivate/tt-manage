@@ -3,7 +3,7 @@
 # Local-machine only: no UCI, netifd, dnsmasq, LAN forwarding, or router state.
 set -eu
 
-VERSION_SCRIPT="0.1.1"
+VERSION_SCRIPT="0.1.2"
 TT_DIR="/etc/trusttunnel"
 CLIENT_TOML="${TT_DIR}/client.toml"
 DIRECT_CONF="${TT_DIR}/direct.conf"
@@ -21,6 +21,10 @@ TUNNEL_DNS_SERVERS_DEFAULT="1.1.1.1 1.0.0.1"
 die() { echo "error: $*" >&2; exit 1; }
 log() { echo "==> $*"; }
 need_root() { [ "$(id -u)" = 0 ] || die "run as root"; }
+# One line at process start for every command: name, script version, UTC time.
+announce_start() {
+  echo "${0##*/} ${VERSION_SCRIPT}  $(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date)"
+}
 need_file() { [ -f "$1" ] || die "not found: $1"; }
 normalize_list() { printf '%s\n' "$1" | tr ',\t\r\n' '    ' | tr -s ' ' | sed 's/^ //;s/ $//'; }
 is_ipv4() { echo "$1" | awk -F. 'NF==4 {for(i=1;i<=4;i++) if($i !~ /^[0-9]+$/ || $i>255) exit 1; exit 0} {exit 1}'; }
@@ -317,7 +321,6 @@ cmd_rollback() {
 cmd_status() {
   local vps="" port="" conf="" tcp_n=0 udp_n=0 active=0
   echo "=== TrustTunnel Linux status ==="
-  echo "script=tt-client-linux.sh ${VERSION_SCRIPT}  time_utc=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date)"
   [ -L "$BIN" ] && echo "  binary [*] $(readlink -f "$BIN")" || echo "  FAIL binary missing"
   [ -x "$BIN" ] && echo "  product: $($BIN --version 2>/dev/null | head -1 || echo unknown)"
   if [ -f "$CLIENT_TOML" ]; then
@@ -358,6 +361,7 @@ cmd_status() {
 cmd_purge() { service_stop; systemctl disable trusttunnel.service trusttunnel-guard.service >/dev/null 2>&1 || true; systemctl daemon-reload; "$POLICY" stop 2>/dev/null || true; rm -f "$INIT" "$GUARD_INIT" "$POLICY" "$CLIENT_TOML" "$DIRECT_CONF" "$RELEASE_META" "$BIN"; rm -f /usr/local/bin/trusttunnel_client-*-linux-*; rmdir "$TT_DIR" 2>/dev/null || true; systemctl daemon-reload; log "purged TT-owned local state"; }
 
 cmd="${1:-help}"; shift || true
+announce_start
 case "$cmd" in
   help|-h|--help) usage; exit 0 ;;
 esac

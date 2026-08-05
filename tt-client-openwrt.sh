@@ -4,7 +4,7 @@
 # Data lifecycle and copy-paste flows: $0 help
 set -e
 
-VERSION_SCRIPT="0.6.7"
+VERSION_SCRIPT="0.6.8"
 
 # Fixed layout — self-contained (only sibling: tt-server.sh on the VPS).
 TT_DIR="/etc/trusttunnel"
@@ -46,6 +46,10 @@ _BIN_TX_SERVICE_WAS_RUNNING=0
 # --- small utils ---
 die() { echo "error: $*" >&2; exit 1; }
 log() { echo "==> $*"; }
+# One line at process start for every command: name, script version, UTC time.
+announce_start() {
+  echo "${0##*/} ${VERSION_SCRIPT}  $(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date)"
+}
 need_root() { [ "$(id -u)" = "0" ] || die "run as root"; }
 
 bak() {
@@ -3371,7 +3375,6 @@ cmd_status() {
   _ST_FAILS=0
   _ST_WARNS=0
   echo "=== TrustTunnel OpenWrt status ==="
-  echo "script=tt-client-openwrt.sh ${VERSION_SCRIPT}  time_utc=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date)"
   echo
   echo "[install]"
   if [ -x "$BIN" ]; then
@@ -3921,6 +3924,7 @@ cmd_purge() {
 main() {
   cmd="${1:-help}"
   [ $# -gt 0 ] && shift
+  announce_start
   case "$cmd" in
     help|-h|--help) usage; exit 0 ;;
   esac

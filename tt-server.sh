@@ -4,7 +4,7 @@
 # Data lifecycle and copy-paste flows: $0 help
 set -euo pipefail
 
-VERSION_SCRIPT="0.1.27"
+VERSION_SCRIPT="0.1.28"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATES_SERVER="${SCRIPT_DIR}/templates/server"
 
@@ -1359,7 +1359,7 @@ cmd_status() {
   local client_count current="" previous=""
   client_count="$(creds_count)"
   echo "=== TrustTunnel server status ==="
-  echo "script=tt-server.sh ${VERSION_SCRIPT}  host=$(hostname -f 2>/dev/null || hostname)  time_utc=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  echo "host=$(hostname -f 2>/dev/null || hostname)"
   echo
 
   echo "[install]"
@@ -1743,9 +1743,15 @@ cmd_purge() {
   echo "OK purge — TT endpoint artifacts removed; KEPT items listed above"
 }
 
+# One line at process start for every command: name, script version, UTC time.
+announce_start() {
+  echo "${0##*/} ${VERSION_SCRIPT}  $(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date)"
+}
+
 main() {
   local cmd="${1:-help}"
   shift || true
+  announce_start
   case "$cmd" in
     help|-h|--help) usage; return 0 ;;
   esac
