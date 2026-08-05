@@ -4,7 +4,7 @@
 # Data lifecycle and copy-paste flows: $0 help
 set -e
 
-VERSION_SCRIPT="0.6.3"
+VERSION_SCRIPT="0.6.4"
 
 # Fixed layout — self-contained (only sibling: tt-server.sh on the VPS).
 TT_DIR="/etc/trusttunnel"
@@ -1547,6 +1547,8 @@ install_dns() {
 }
 
 # --- binary / service ---
+# Stop procd service and ensure no stray process remains (same end state as a
+# successful /etc/init.d/trusttunnel stop). Do not swallow stop failures.
 service_stop() {
   local i=0
   if [ ! -x "$INIT" ]; then
@@ -1554,14 +1556,36 @@ service_stop() {
     echo "error: cannot stop running client: init script missing: $INIT" >&2
     return 1
   fi
-  "$INIT" stop >/dev/null 2>&1 || true
-  while client_running && [ "$i" -lt 10 ]; do
+  if ! "$INIT" stop; then
+    # procd may return non-zero if already stopped; only error if still running.
+    client_running || return 0
+    echo "error: $INIT stop failed while client still running" >&2
+  fi
+  i=0
+  while client_running && [ "$i" -lt 15 ]; do
     i=$((i + 1))
     sleep 1
   done
-  client_running || return 0
-  echo "error: trusttunnel_client did not stop within 10 seconds" >&2
-  return 1
+  if client_running; then
+    log "client still running after stop — sending TERM"
+    # busybox: killall or kill $(pidof)
+    killall -TERM trusttunnel_client 2>/dev/null \
+      || kill -TERM $(pidof trusttunnel_client) 2>/dev/null \
+      || true
+    sleep 2
+  fi
+  if client_running; then
+    log "client still running after TERM — sending KILL"
+    killall -KILL trusttunnel_client 2>/dev/null \
+      || kill -KILL $(pidof trusttunnel_client) 2>/dev/null \
+      || true
+    sleep 1
+  fi
+  if client_running; then
+    echo "error: trusttunnel_client did not stop" >&2
+    return 1
+  fi
+  return 0
 }
 
 service_start() {
@@ -1570,7 +1594,18 @@ service_start() {
     return 1
   }
   "$INIT" enable >/dev/null 2>&1 || return 1
-  "$INIT" start
+  "$INIT" start || return 1
+  # Wait until process is up (procd start can return before instance is ready).
+  local i=0
+  while ! client_running && [ "$i" -lt 15 ]; do
+    i=$((i + 1))
+    sleep 1
+  done
+  client_running || {
+    echo "error: trusttunnel_client did not start" >&2
+    return 1
+  }
+  return 0
 }
 
 service_restart() {
@@ -1578,13 +1613,53 @@ service_restart() {
   service_start
 }
 
+# Stop+start without changing enablement. Prefer init restart when available so
+# behaviour matches `/etc/init.d/trusttunnel restart` (what operators use).
 service_restart_preserve_enablement() {
-  service_stop || return 1
   [ -x "$INIT" ] || {
     echo "error: init script missing: $INIT" >&2
     return 1
   }
-  "$INIT" start
+  # OpenWrt rc.common restart = stop then start; still force a clean process
+  # death so we never leave a wedged long-lived PID under a new instance.
+  if ! service_stop; then
+    return 1
+  fi
+  # start without re-enable (preserve disabled state if admin had disabled)
+  if ! "$INIT" start; then
+    echo "error: $INIT start failed" >&2
+    return 1
+  fi
+  local i=0
+  while ! client_running && [ "$i" -lt 15 ]; do
+    i=$((i + 1))
+    sleep 1
+  done
+  if ! client_running; then
+    echo "error: trusttunnel_client did not start after restart" >&2
+    return 1
+  fi
+  return 0
+}
+
+# After process start: wait for CONNECTED + tun0 before live probes (avoids
+# false FAIL while H3 is still handshaking).
+service_wait_tunnel_ready() {
+  local i=0 max="${1:-30}"
+  while [ "$i" -lt "$max" ]; do
+    i=$((i + 1))
+    if client_running \
+      && ip link show dev tun0 >/dev/null 2>&1 \
+      && logread 2>/dev/null | tail -n 40 | grep -q 'VPN_SS_CONNECTED'; then
+      return 0
+    fi
+    # CONNECTED line may have scrolled off; accept tun0 + process after a few secs
+    if [ "$i" -ge 8 ] && client_running && ip link show dev tun0 >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  client_running && ip link show dev tun0 >/dev/null 2>&1
 }
 
 binary_resolve_link() {
@@ -3176,6 +3251,7 @@ cmd_enable() {
 }
 
 # Stop+start client; keep boot enablement; do not touch PBR/kill-switch.
+# Must be as reliable as `/etc/init.d/trusttunnel restart` (hard stop + settle + verify).
 cmd_restart() {
   local vps_ip wan_dev i=0
   need_installed
@@ -3184,17 +3260,20 @@ cmd_restart() {
   wan_dev="$(get_wan_dev)"
   log "restart TrustTunnel service (PBR/kill-switch unchanged)"
   service_restart_preserve_enablement || die "trusttunnel restart failed"
-  # Give H3 handoff a moment; single-shot ICMP right after start often false-fails.
-  while [ "$i" -lt 4 ]; do
+  log "wait for tunnel to settle (process + tun0 + H3)"
+  service_wait_tunnel_ready 30 || log "warn: settle timeout — still verifying"
+  # Same budget as upgrade: H3 + ICMP mux often need >8s after a long-lived wedge.
+  i=0
+  while [ "$i" -lt 6 ]; do
     i=$((i + 1))
-    sleep 2
+    sleep 3
     if verify_tunnel && verify_pbr "$vps_ip" "$wan_dev" && verify_icmp; then
       echo "OK restart"
       return 0
     fi
-    [ "$i" -lt 4 ] && log "verify attempt ${i}/4 not ready yet..."
+    [ "$i" -lt 6 ] && log "verify attempt ${i}/6 not ready yet..."
   done
-  die "restart completed but live verification failed (tunnel/PBR/ICMP)"
+  die "restart completed but live verification failed (tunnel/PBR/ICMP) — check logread -e trusttunnel and VPS [icmp]"
 }
 
 cmd_rollback() {
