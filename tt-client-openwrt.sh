@@ -4,7 +4,7 @@
 # Data lifecycle and copy-paste flows: $0 help
 set -e
 
-VERSION_SCRIPT="0.6.5"
+VERSION_SCRIPT="0.6.6"
 
 # Fixed layout — self-contained (only sibling: tt-server.sh on the VPS).
 TT_DIR="/etc/trusttunnel"
@@ -145,7 +145,7 @@ NAME
 
 SYNOPSIS
     $0 install --config FILE [OPTIONS]
-    $0 upgrade [--binary FILE | --version TAG]
+    $0 upgrade [--binary PATH | --version TAG]
     $0 update-creds --config FILE
     $0 update-direct [DIRECT-PROFILE OPTIONS]
     $0 direct-enable | direct-disable
@@ -183,9 +183,9 @@ DESCRIPTION
     If 1.1.1.1 is direct, automatic VPS-egress identity verification through
     it is skipped; test a known non-direct IP checker as instructed.
 
-    install also accepts:
+    install/upgrade binary source (same flags on server and clients):
         --version TAG   exact ${GITHUB_REPO} release
-        --binary FILE  local binary instead of a release
+        --binary PATH   local file instead of a release
     install is clean-only and refuses complete or partial TrustTunnel state.
     Use upgrade/update-* for an installed system, or purge before reinstalling.
 
@@ -568,7 +568,7 @@ release_arch() {
   case "$arch" in
     aarch64*|arm64*) echo aarch64 ;;
     mipsel*) echo mipsel ;;
-    *) die "unsupported release architecture: ${arch} (use --binary FILE)" ;;
+    *) die "unsupported release architecture: ${arch} (use --binary PATH)" ;;
   esac
 }
 
@@ -3339,7 +3339,7 @@ cmd_status() {
   _ST_FAILS=0
   _ST_WARNS=0
   echo "=== TrustTunnel OpenWrt status ==="
-  echo "time_utc=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date)"
+  echo "script=tt-client-openwrt.sh ${VERSION_SCRIPT}  time_utc=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date)"
   echo
   echo "[install]"
   if [ -x "$BIN" ]; then
@@ -3354,7 +3354,7 @@ cmd_status() {
     else
       _st_fail "binary path is not a managed symlink"
     fi
-    "$BIN" --version 2>/dev/null | head -1 | sed 's/^/  info  /' || true
+    _st_info "product: $("$BIN" --version 2>/dev/null | head -1 || echo unknown)"
     if [ -f "$RELEASE_META" ]; then
       _st_info "release: $(tr '\n' ' ' <"$RELEASE_META")"
     else

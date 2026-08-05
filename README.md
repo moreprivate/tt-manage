@@ -133,7 +133,7 @@ Server:
 
 ```sh
 bash tt-server.sh status
-bash tt-server.sh upgrade [--version TAG]
+bash tt-server.sh upgrade [--binary PATH | --version TAG]
 bash tt-server.sh rollback
 bash tt-server.sh add-user NAME
 bash tt-server.sh del-user NAME
@@ -146,7 +146,7 @@ OpenWrt:
 
 ```sh
 sh tt-client-openwrt.sh status
-sh tt-client-openwrt.sh upgrade [--version TAG]
+sh tt-client-openwrt.sh upgrade [--binary PATH | --version TAG]
 sh tt-client-openwrt.sh rollback
 sh tt-client-openwrt.sh update-creds --config ./openwrt.toml
 sh tt-client-openwrt.sh update-direct [OPTIONS]
@@ -164,7 +164,7 @@ Linux:
 
 ```sh
 sh tt-client-linux.sh status
-sh tt-client-linux.sh upgrade [--version TAG]
+sh tt-client-linux.sh upgrade [--binary PATH | --version TAG]
 sh tt-client-linux.sh rollback
 sh tt-client-linux.sh update-creds --config ./linux.toml
 sh tt-client-linux.sh disable
@@ -299,7 +299,7 @@ Install the arm64 APK on modern phones (~15–35MB split release). A fat multi-A
 APK is not the default (native size multiplies by ~3×).
 
 Every binary release has a checksum sidecar and manifest. Use `--version TAG`
-to pin a release or `--local`/`--binary` for a reviewed local file.
+to pin a release or `--binary PATH` for a local file (same flag on server and clients).
 
 The component workflows are manual-only. Upstream rebasing is manual. The
 release chain workflow lives in `tt-manage` and dispatches server → client →

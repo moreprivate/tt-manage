@@ -4,7 +4,7 @@
 # Data lifecycle and copy-paste flows: $0 help
 set -euo pipefail
 
-VERSION_SCRIPT="0.1.26"
+VERSION_SCRIPT="0.1.27"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATES_SERVER="${SCRIPT_DIR}/templates/server"
 
@@ -72,7 +72,7 @@ validate_upstream_protocol() {
 }
 
 # Install packages only if missing (skip apt-get update when everything is present —
-# offline --local/--skip-certbot re-runs must not die on "apt-get update" with no net).
+# offline --binary/--skip-certbot re-runs must not die on "apt-get update" with no net).
 apt_install() {
   local p need_apt=0
   export DEBIAN_FRONTEND=noninteractive
@@ -277,9 +277,9 @@ NAME
     tt-server.sh ${VERSION_SCRIPT} — TrustTunnel endpoint (root on this VPS)
 
 SYNOPSIS
-    $0 install --custom-sni HOST [--upstream-protocol auto|http2|http3] [--icmp-interface IFACE] [--local PATH | --version TAG]
-    $0 install --custom-sni HOST --skip-certbot [--upstream-protocol auto|http2|http3] [--icmp-interface IFACE] [--local PATH | --version TAG]
-    $0 upgrade [--local PATH | --version TAG]
+    $0 install --custom-sni HOST [--upstream-protocol auto|http2|http3] [--icmp-interface IFACE] [--binary PATH | --version TAG]
+    $0 install --custom-sni HOST --skip-certbot [--upstream-protocol auto|http2|http3] [--icmp-interface IFACE] [--binary PATH | --version TAG]
+    $0 upgrade [--binary PATH | --version TAG]
     $0 add-user <name>
     $0 del-user <name>
     $0 list-users | status
@@ -298,7 +298,7 @@ DESCRIPTION
         generated client configuration. HOST must be an ASCII DNS hostname,
         not an IP address.
         Binary: latest published ${GITHUB_REPO} release (default),
-                or --version TAG, or --local PATH.
+                or --version TAG, or --binary PATH.
         Release downloads require a matching SHA-256 sidecar; there is no
         fallback to upstream or to GitHub Actions artifacts.
         Public IP: https://1.1.1.1|1.0.0.1/cdn-cgi/trace → ${ENDPOINT_IP_FILE}.
@@ -321,7 +321,7 @@ DESCRIPTION
 
     upgrade
         Binary only: latest published release by default, or --version TAG,
-        or --local PATH. Does not touch configs, credentials, clients, certs,
+        or --binary PATH. Does not touch configs, credentials, clients, certs,
         firewall, unit contents, or enablement. If the endpoint is active,
         restart and verify it; if inactive, leave it inactive.
 
@@ -359,13 +359,13 @@ EXAMPLES
 
     # Pin release or use a local build
     bash $0 install --custom-sni camouflage.example --version 20260725T064943Z-c6767f5d5015
-    bash $0 install --custom-sni camouflage.example --local /root/trusttunnel_endpoint
+    bash $0 install --custom-sni camouflage.example --binary /root/trusttunnel_endpoint
     bash $0 install --custom-sni camouflage.example --icmp-interface eth0
 
     # Own PEMs (no certbot)
     install -d -m 0750 ${CERT_DIR}
     # place fullchain.pem + privkey.pem, then:
-    bash $0 install --custom-sni camouflage.example --skip-certbot --local /root/trusttunnel_endpoint
+    bash $0 install --custom-sni camouflage.example --skip-certbot --binary /root/trusttunnel_endpoint
 
     # Create OpenWrt (or phone) client; password only in the file
     bash $0 add-user openwrt
@@ -1121,7 +1121,7 @@ cmd_install() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --version) ver="${2:?}"; shift 2 ;;
-      --local) local_bin="${2:?}"; shift 2 ;;
+      --binary) local_bin="${2:?}"; shift 2 ;;
       --custom-sni) custom_sni="${2:?}"; shift 2 ;;
       --upstream-protocol) UPSTREAM_PROTOCOL="${2:?}"; shift 2 ;;
       --icmp-interface) icmp_iface="${2:?}"; shift 2 ;;
@@ -1131,7 +1131,7 @@ cmd_install() {
     esac
   done
   if [[ -n "$local_bin" && -n "$ver" ]]; then
-    die "use only one of --local or --version"
+    die "use only one of --binary or --version"
   fi
   validate_custom_sni "$custom_sni"
   validate_upstream_protocol "$UPSTREAM_PROTOCOL"
@@ -1153,8 +1153,8 @@ cmd_install() {
   ensure_dir "${CERT_DIR}"
 
   if [[ -n "$local_bin" ]]; then
-    [[ -f "$local_bin" ]] || die "local binary not found: $local_bin"
-    log "install binary from --local"
+    [[ -f "$local_bin" ]] || die "binary file not found: $local_bin"
+    log "install binary from --binary"
     binary_tag="local-$(sha256sum "$local_bin" | awk '{print $1}')"
     release_source=local
   else
@@ -1219,17 +1219,17 @@ cmd_upgrade() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --version) ver="${2:?}"; shift 2 ;;
-      --local) local_bin="${2:?}"; shift 2 ;;
+      --binary) local_bin="${2:?}"; shift 2 ;;
       -h|--help) usage; exit 0 ;;
       *) die "upgrade: unknown option $1 (see help)" ;;
     esac
   done
-  [[ -z "$local_bin" || -z "$ver" ]] || die "use only one of --local or --version"
+  [[ -z "$local_bin" || -z "$ver" ]] || die "use only one of --binary or --version"
   is_installed || die "not installed (run install first)"
   need_cmds install sha256sum readlink ln mv basename dirname systemctl
 
   if [[ -n "$local_bin" ]]; then
-    [[ -f "$local_bin" ]] || die "local binary not found: $local_bin"
+    [[ -f "$local_bin" ]] || die "binary file not found: $local_bin"
     binary_tag="local-$(sha256sum "$local_bin" | awk '{print $1}')"
     release_source=local
   else
@@ -1359,7 +1359,7 @@ cmd_status() {
   local client_count current="" previous=""
   client_count="$(creds_count)"
   echo "=== TrustTunnel server status ==="
-  echo "host=$(hostname -f 2>/dev/null || hostname)  time_utc=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  echo "script=tt-server.sh ${VERSION_SCRIPT}  host=$(hostname -f 2>/dev/null || hostname)  time_utc=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   echo
 
   echo "[install]"
@@ -1381,7 +1381,7 @@ cmd_status() {
     else
       _st_fail "binary path is not a managed symlink"
     fi
-    _st_info "version: $("${INSTALL_DIR}/${BIN_NAME}" --version 2>/dev/null | head -1 || echo unknown)"
+    _st_info "product: $("${INSTALL_DIR}/${BIN_NAME}" --version 2>/dev/null | head -1 || echo unknown)"
     if [[ -f "${RELEASE_META}" ]]; then
       _st_info "release: $(tr '\n' ' ' <"${RELEASE_META}")"
     else

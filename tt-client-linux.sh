@@ -3,7 +3,7 @@
 # Local-machine only: no UCI, netifd, dnsmasq, LAN forwarding, or router state.
 set -eu
 
-VERSION_SCRIPT="0.1.0"
+VERSION_SCRIPT="0.1.1"
 TT_DIR="/etc/trusttunnel"
 CLIENT_TOML="${TT_DIR}/client.toml"
 DIRECT_CONF="${TT_DIR}/direct.conf"
@@ -32,8 +32,8 @@ NAME
     tt-client-linux.sh ${VERSION_SCRIPT} — TrustTunnel on the current Linux host
 
 SYNOPSIS
-    $0 install --config FILE [--binary FILE | --version TAG]
-    $0 upgrade [--binary FILE | --version TAG]
+    $0 install --config FILE [--binary PATH | --version TAG]
+    $0 upgrade [--binary PATH | --version TAG]
     $0 update-creds --config FILE
     $0 enable | disable | rollback | status | purge
 
@@ -45,8 +45,8 @@ DESCRIPTION
     LIST values accept commas or whitespace. Config: upstream_protocol auto|http2|http3
     (profiles from add-user default to http3). status reports live H2/H3 via ss.
 
-    --binary FILE and --version TAG are accepted by install/upgrade. Releases
-    come from ${GITHUB_REPO}; checksums and the embedded binary version are verified.
+    install/upgrade: --binary PATH or --version TAG (same as server/OpenWrt).
+    Releases from ${GITHUB_REPO}; checksums and embedded binary version verified.
 
     install is clean-only. Use upgrade for an installed host, rollback to switch
     to the previous successful binary, disable/enable for service control, and
@@ -317,7 +317,9 @@ cmd_rollback() {
 cmd_status() {
   local vps="" port="" conf="" tcp_n=0 udp_n=0 active=0
   echo "=== TrustTunnel Linux status ==="
+  echo "script=tt-client-linux.sh ${VERSION_SCRIPT}  time_utc=$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date)"
   [ -L "$BIN" ] && echo "  binary [*] $(readlink -f "$BIN")" || echo "  FAIL binary missing"
+  [ -x "$BIN" ] && echo "  product: $($BIN --version 2>/dev/null | head -1 || echo unknown)"
   if [ -f "$CLIENT_TOML" ]; then
     echo "  ok    $CLIENT_TOML"
     conf="$(toml_get_str upstream_protocol "$CLIENT_TOML" 2>/dev/null || true)"
