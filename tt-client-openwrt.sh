@@ -4,7 +4,7 @@
 # Data lifecycle and copy-paste flows: $0 help
 set -e
 
-VERSION_SCRIPT="0.6.6"
+VERSION_SCRIPT="0.6.7"
 
 # Fixed layout — self-contained (only sibling: tt-server.sh on the VPS).
 TT_DIR="/etc/trusttunnel"
@@ -149,8 +149,8 @@ SYNOPSIS
     $0 update-creds --config FILE
     $0 update-direct [DIRECT-PROFILE OPTIONS]
     $0 direct-enable | direct-disable
-    $0 wan-shape --download KBIT --upload KBIT [--iface DEV]
-    $0 wan-shape-disable
+    $0 tun-shape --download KBIT --upload KBIT
+    $0 tun-shape-disable
     $0 disable | enable | restart
     $0 rollback
     $0 status
@@ -213,12 +213,11 @@ DESCRIPTION
     An independent nftables kill switch starts before OpenWrt networking and
     remains active across client and firewall4 stops/reloads.
 
-    wan-shape installs SQM/CAKE on the WAN device to fight bufferbloat under
-    multi-flow load. Set KBIT to ~85–95% of the real bottleneck (ISP plan, or
-    measured VPN bulk if the tunnel is slower). Disables other enabled sqm
-    queues on the same iface so rates match. Independent of tunnel protocol.
-    wan-shape-disable removes only the TT-owned SQM section.
-    status reports live qdisc when shaped.
+    tun-shape installs optional SQM/CAKE on tun0 only (the tunnel), never on
+    ISP WAN. WAN is typically far faster than the VPN; shaping WAN only caps
+    tunnel throughput. Use tun-shape only if bufferbloat under load is proven;
+    rates ≈ 85–95% of measured tunnel bulk (kbit/s). tun-shape-disable removes
+    the TT-owned SQM section.
 
 EXAMPLES
     # Full NL installation
@@ -233,8 +232,9 @@ EXAMPLES
 
     ./tt-client-openwrt.sh upgrade
     ./tt-client-openwrt.sh update-direct
-    # Shape slightly under the real bottleneck (ISP or VPN bulk), kbit/s:
-    ./tt-client-openwrt.sh wan-shape --download 22000 --upload 20000
+    # Optional: shape tun0 only (never WAN), kbit/s ≈ tunnel bulk:
+    ./tt-client-openwrt.sh tun-shape --download 100000 --upload 100000
+    ./tt-client-openwrt.sh tun-shape-disable
     ./tt-client-openwrt.sh status
     ./tt-client-openwrt.sh rollback
 
@@ -1838,7 +1838,7 @@ is_positive_kbit() {
 wan_shape_save() {
   # $1=iface $2=download_kbit $3=upload_kbit
   cat >"$WAN_SHAPE_CONF" <<EOF
-# Managed by tt-client-openwrt.sh wan-shape — rates in kbit/s
+# Managed by tt-client-openwrt.sh tun-shape — CAKE on tunnel (tun0), rates in kbit/s
 IFACE=$1
 DOWNLOAD_KBIT=$2
 UPLOAD_KBIT=$3
@@ -2026,10 +2026,10 @@ apply_wan_shape_uci() {
 
   # Persist only after start so conf never claims rates that are not live.
   wan_shape_save "$iface" "$down" "$up"
-  log "WAN CAKE: iface=${iface} download=${down}kbit upload=${up}kbit (piece_of_cake, sqm.${SQM_UCI_SECTION})"
+  log "tunnel CAKE: iface=${iface} download=${down}kbit upload=${up}kbit (piece_of_cake, sqm.${SQM_UCI_SECTION})"
 
   sqm_verify_live_rates "$iface" "$down" "$up" \
-    || die "wan-shape applied but live CAKE rates do not match — see uci show sqm / tc qdisc"
+    || die "tun-shape applied but live CAKE rates do not match — see uci show sqm / tc qdisc"
 }
 
 disable_wan_shape() {
@@ -2046,7 +2046,7 @@ disable_wan_shape() {
     fi
   fi
   rm -f "$WAN_SHAPE_CONF"
-  log "WAN CAKE disabled (TT sqm.${SQM_UCI_SECTION} removed)"
+  log "tunnel CAKE disabled (TT sqm.${SQM_UCI_SECTION} removed)"
 }
 
 status_report_wan_shape() {
@@ -2069,12 +2069,21 @@ status_report_wan_shape() {
     iface="$IFACE"
     down="$DOWNLOAD_KBIT"
     up="$UPLOAD_KBIT"
-    _st_warn "wan-shape.conf present but sqm.${SQM_UCI_SECTION} not enabled — re-run wan-shape"
+    _st_warn "shape conf present but sqm.${SQM_UCI_SECTION} not enabled — re-run tun-shape or tun-shape-disable"
   else
-    _st_info "not configured (script-only: $0 wan-shape --download KBIT --upload KBIT)"
+    _st_info "not configured (optional: $0 tun-shape --download KBIT --upload KBIT on tun0)"
     return 0
   fi
   [ -n "$iface" ] || return 0
+
+  # Legacy mistake: TT CAKE on ISP WAN caps the tunnel; flag it hard.
+  case "$iface" in
+    tun0|tun[0-9]*) ;;
+    *)
+      _st_fail "TT shape is on ${iface} (not tun0) — that caps ISP/WAN; run: $0 tun-shape-disable"
+      return 0
+      ;;
+  esac
 
   for sec in $(sqm_queue_sections); do
     [ "$sec" = "$SQM_UCI_SECTION" ] && continue
@@ -2083,7 +2092,7 @@ status_report_wan_shape() {
     [ "$ifc" = "$iface" ] && [ "$oen" = "1" ] && others="${others} ${sec}"
   done
   if [ -n "$others" ]; then
-    _st_fail "other enabled sqm on ${iface}:${others} — run: $0 wan-shape --download ${down} --upload ${up}"
+    _st_fail "other enabled sqm on ${iface}:${others} — run: $0 tun-shape --download ${down} --upload ${up}"
   fi
 
   if command -v tc >/dev/null 2>&1; then
@@ -2107,48 +2116,71 @@ status_report_wan_shape() {
       fi
       if [ -n "$live_up" ] && is_positive_kbit "$up"; then
         if [ "$live_up" -lt $((up / 1000 - 1)) ] || [ "$live_up" -gt $((up / 1000 + 1)) ]; then
-          _st_fail "live upload ${live_up}Mbit != configured ${up}kbit — re-run wan-shape"
+          _st_fail "live upload ${live_up}Mbit != configured ${up}kbit — re-run tun-shape"
         fi
       fi
       if [ -n "$live_down" ] && is_positive_kbit "$down"; then
         if [ "$live_down" -lt $((down / 1000 - 1)) ] || [ "$live_down" -gt $((down / 1000 + 1)) ]; then
-          _st_fail "live download ${live_down}Mbit != configured ${down}kbit — re-run wan-shape"
+          _st_fail "live download ${live_down}Mbit != configured ${down}kbit — re-run tun-shape"
         fi
       fi
     elif [ -n "$q" ]; then
       _st_fail "live qdisc on ${iface} is not cake"
       printf '%s\n' "$q" | sed 's/^/        /'
     else
-      _st_fail "no qdisc on ${iface} (sqm not active?) — re-run wan-shape"
+      _st_fail "no qdisc on ${iface} (sqm not active?) — re-run tun-shape"
     fi
   else
     _st_warn "tc missing; cannot show live qdisc"
   fi
 }
 
-cmd_wan_shape() {
-  local down="" up="" iface=""
+# True if iface is the tunnel (only place TT may shape).
+is_tunnel_shape_iface() {
+  case "$1" in
+    tun0|tun[0-9]*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+cmd_tun_shape() {
+  local down="" up="" iface="tun0"
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --download) down="${2:-}"; shift 2 ;;
       --upload) up="${2:-}"; shift 2 ;;
-      --iface) iface="${2:-}"; shift 2 ;;
-      *) die "wan-shape: unknown option: $1 (want --download KBIT --upload KBIT [--iface DEV])" ;;
+      --iface)
+        iface="${2:-}"
+        shift 2
+        is_tunnel_shape_iface "$iface" \
+          || die "tun-shape: only tunnel ifaces (tun0); never shape ISP WAN (got: ${iface})"
+        ;;
+      *) die "tun-shape: unknown option: $1 (want --download KBIT --upload KBIT)" ;;
     esac
   done
-  is_positive_kbit "$down" || die "wan-shape: --download KBIT required (positive integer kbit/s)"
-  is_positive_kbit "$up" || die "wan-shape: --upload KBIT required (positive integer kbit/s)"
-  [ -n "$iface" ] || iface="$(get_wan_dev)"
-  [ -n "$iface" ] || die "wan-shape: cannot detect WAN device; pass --iface DEV"
+  is_positive_kbit "$down" || die "tun-shape: --download KBIT required (positive integer kbit/s)"
+  is_positive_kbit "$up" || die "tun-shape: --upload KBIT required (positive integer kbit/s)"
+  is_tunnel_shape_iface "$iface" || die "tun-shape: refuse non-tunnel iface: ${iface}"
   ip link show dev "$iface" >/dev/null 2>&1 \
-    || die "wan-shape: interface not found: ${iface}"
+    || die "tun-shape: ${iface} not present (start TrustTunnel first)"
   apply_wan_shape_uci "$iface" "$down" "$up"
-  log "OK wan-shape sole owner sqm.${SQM_UCI_SECTION} on ${iface} (${down}/${up} kbit)"
-  log "tip: rates ≈ 85–95% of real bottleneck (VPN bulk if tunnel << ISP); re-run this command after rate change"
+  log "OK tun-shape sqm.${SQM_UCI_SECTION} on ${iface} (${down}/${up} kbit)"
+  log "tip: only if bufferbloat is proven; rates ≈ 85–95% of measured tunnel bulk — not ISP WAN rate"
+}
+
+cmd_tun_shape_disable() {
+  [ "$#" -eq 0 ] || die "tun-shape-disable takes no arguments"
+  disable_wan_shape
+}
+
+# Old name: refuse shaping WAN; point at tun-shape / disable for cleanup.
+cmd_wan_shape() {
+  die "wan-shape removed: never CAKE ISP WAN (it throttles the VPN). Run: $0 tun-shape-disable   then optionally: $0 tun-shape --download KBIT --upload KBIT (tun0 only)"
 }
 
 cmd_wan_shape_disable() {
-  [ "$#" -eq 0 ] || die "wan-shape-disable takes no arguments"
+  # Allow old name to clean up a mistaken WAN CAKE install.
+  log "tun-shape-disable (was wan-shape-disable)"
   disable_wan_shape
 }
 
@@ -3402,7 +3434,7 @@ cmd_status() {
   echo "[transport]"
   status_report_transport "$vps_ip" "$vps_port"
   echo
-  echo "[wan-shape]"
+  echo "[tun-shape]"
   status_report_wan_shape
   echo
   echo "[icmp]"
@@ -3708,7 +3740,7 @@ cmd_purge() {
 
   # Drop TT-owned SQM/CAKE before removing state files (UCI lives outside TT_DIR).
   if [ -f "$WAN_SHAPE_CONF" ] || uci -q get "sqm.${SQM_UCI_SECTION}" >/dev/null 2>&1; then
-    log "0/5 disable TT wan-shape (sqm.${SQM_UCI_SECTION})"
+    log "0/5 disable TT tun-shape (sqm.${SQM_UCI_SECTION})"
     disable_wan_shape 2>/dev/null || true
   fi
 
@@ -3905,6 +3937,8 @@ main() {
     restart)      cmd_restart "$@" ;;
     rollback)     cmd_rollback "$@" ;;
     status)       cmd_status "$@" ;;
+    tun-shape)    cmd_tun_shape "$@" ;;
+    tun-shape-disable) cmd_tun_shape_disable "$@" ;;
     wan-shape)    cmd_wan_shape "$@" ;;
     wan-shape-disable) cmd_wan_shape_disable "$@" ;;
     purge)        cmd_purge "$@" ;;

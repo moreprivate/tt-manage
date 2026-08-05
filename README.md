@@ -152,8 +152,8 @@ sh tt-client-openwrt.sh update-creds --config ./openwrt.toml
 sh tt-client-openwrt.sh update-direct [OPTIONS]
 sh tt-client-openwrt.sh direct-enable
 sh tt-client-openwrt.sh direct-disable
-sh tt-client-openwrt.sh wan-shape --download KBIT --upload KBIT   # CAKE ~85–95% ISP rate
-sh tt-client-openwrt.sh wan-shape-disable
+sh tt-client-openwrt.sh tun-shape --download KBIT --upload KBIT   # optional CAKE on tun0 only
+sh tt-client-openwrt.sh tun-shape-disable
 sh tt-client-openwrt.sh disable
 sh tt-client-openwrt.sh enable
 sh tt-client-openwrt.sh restart
