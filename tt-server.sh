@@ -330,7 +330,7 @@ DESCRIPTION
         Autogen strong password (never printed).
         Writes credentials.toml [[client]] + ${CLIENTS_DIR}/<name>.toml (0600).
         Generated clients use the install-time protocol (default http2;
-        http_connections_num=${HTTP_CONNECTIONS_NUM}; 0 = client library default).
+        http_connections_num=${HTTP_CONNECTIONS_NUM}; 0 = client default of 8).
         Starts/restarts the endpoint. Copy the .toml to clients.
 
     del-user <name>
