@@ -13,10 +13,10 @@ INSTALL_DIR="/opt/trusttunnel"
 SERVICE_USER="trusttunnel"
 SERVICE_NAME="trusttunnel"
 CUSTOM_SNI=""
-HTTP2_CONNECTIONS_NUM=4
+HTTP_CONNECTIONS_NUM=0
 # Tolerate last-mile bufferbloat under load (library default health check is 7s).
 HEALTH_CHECK_TIMEOUT_MS=15000
-UPSTREAM_PROTOCOL="http3"
+UPSTREAM_PROTOCOL="http2"
 CERT_LIVE_NAME="ocserv-ip"
 # Release source; override only for an intentional mirror.
 GITHUB_REPO="${TT_GITHUB_REPO:-moreprivate/tt-server}"
@@ -293,7 +293,7 @@ DESCRIPTION
 
     install
         --upstream-protocol auto|http2|http3 selects the transport written to
-        generated client files (default: http3). The endpoint always enables H2+H3.
+        generated client files (default: http2). The endpoint always enables H2+H3.
         --custom-sni HOST is mandatory. It is written to hosts.toml and every
         generated client configuration. HOST must be an ASCII DNS hostname,
         not an IP address.
@@ -329,8 +329,8 @@ DESCRIPTION
         Required before a client can authenticate (and for each new device).
         Autogen strong password (never printed).
         Writes credentials.toml [[client]] + ${CLIENTS_DIR}/<name>.toml (0600).
-        Generated clients use the install-time protocol (default http3; HTTP/2
-        uses ${HTTP2_CONNECTIONS_NUM} parallel connections).
+        Generated clients use the install-time protocol (default http2;
+        http_connections_num=${HTTP_CONNECTIONS_NUM}; 0 = client library default).
         Starts/restarts the endpoint. Copy the .toml to clients.
 
     del-user <name>
@@ -950,10 +950,10 @@ client_random = ""
 skip_verification = false
 certificate = ""
 upstream_protocol = "${UPSTREAM_PROTOCOL}"
-http2_connections_num = ${HTTP2_CONNECTIONS_NUM}
+http_connections_num = ${HTTP_CONNECTIONS_NUM}
 health_check_timeout_ms = ${HEALTH_CHECK_TIMEOUT_MS}
 anti_dpi = false
-dns_upstreams = []
+dns_upstreams = ["1.1.1.1", "1.0.0.1"]
 
 # OpenWrt: set bound_if to your WAN device (e.g. "wan").
 # Apps that own the tunnel can ignore [listener].

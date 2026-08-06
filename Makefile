@@ -62,8 +62,12 @@ ANDROID_NDK_PKG := ndk;29.0.14206865
 ANDROID_CMAKE_PKG := cmake;3.31.6
 ANDROID_CMAKE_DIR = $(ANDROID_SDK_ROOT)/cmake/3.31.6
 
+# Always the invoking host user (never root-in-docker).
 HOST_UID := $(shell id -u)
 HOST_GID := $(shell id -g)
+ifeq ($(HOST_UID),0)
+  $(error Do not run this Makefile as root. Use your normal login user so Docker files stay owned by you.)
+endif
 
 # Signing only (secret). Not a toolchain. Never in git.
 # Freeze host path at outer make parse time. Inside Docker HOME is /tmp/tt-home, so
@@ -141,9 +145,11 @@ check-docker: check-repos
 	  || { echo "pulling $(BUILD_IMAGE)"; '$(DOCKER)' pull '$(BUILD_IMAGE)'; }
 
 # GOAL = make target inside container (build-router-native | build-chain-native)
+# Always --user $(id -u):$(id -g). Never omit --user (default container user can be root).
 docker-run: check-docker docker-prep
 	@test -n '$(GOAL)' || { echo 'docker-run requires GOAL=...' >&2; exit 1; }
-	@echo "==> $(GOAL) in $(BUILD_IMAGE) as uid=$(HOST_UID) (self-contained; no host Flutter/SDK)"
+	@test '$(HOST_UID)' != '0' || { echo 'error: refuse Docker as root; run make as your local user' >&2; exit 1; }
+	@echo "==> $(GOAL) in $(BUILD_IMAGE) as uid=$(HOST_UID) gid=$(HOST_GID) (local user only; no root docker)"
 	'$(DOCKER)' run --rm --init \
 	  --user '$(HOST_UID):$(HOST_GID)' \
 	  -e HOME=$(C_HOME) \
@@ -310,19 +316,75 @@ setup-cross:
 	  rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl; \
 	fi
 
+# Client Conan: prefer image/system `conan` (adguard/core-libs ships it). Fall back
+# to tt-client/env only when needed. That env is on a host↔Docker bind-mount, so a
+# venv created on the host has absolute shebangs under /home/... which ENOENT inside
+# /workspace — never leave a broken env/bin on PATH ahead of system conan.
 setup-client:
 	@set -e; \
-	if ! '$(CLIENT_ENV)/bin/python3' -c 'import sys' >/dev/null 2>&1; then \
-	  echo "Creating client venv at $(CLIENT_ENV)"; \
+	use_system=0; \
+	if command -v conan >/dev/null 2>&1 && conan --version >/dev/null 2>&1; then \
+	  use_system=1; \
+	fi; \
+	if [ "$$use_system" = 1 ]; then \
+	  if [ -d '$(CLIENT_ENV)' ]; then \
+	    env_ok=1; \
+	    if [ -f '$(CLIENT_ENV)/pyvenv.cfg' ] && ! grep -qF '$(CLIENT_ENV)' '$(CLIENT_ENV)/pyvenv.cfg'; then env_ok=0; fi; \
+	    if [ -e '$(CLIENT_CONAN)' ] && ! '$(CLIENT_CONAN)' --version >/dev/null 2>&1; then env_ok=0; fi; \
+	    if [ "$$env_ok" = 0 ]; then \
+	      echo "Removing unusable bind-mounted client venv at $(CLIENT_ENV) (host path / stale shebang; using system Conan)"; \
+	      rm -rf '$(CLIENT_ENV)'; \
+	    fi; \
+	  fi; \
+	  echo "Using system Conan: $$(conan --version)"; \
+	  conan profile detect --force; \
+	  if (cd '$(CLIENT_DIR)' && conan graph info . --profile:host=default >/dev/null 2>&1); then \
+	    echo "Conan dependencies already bootstrapped, skipping clone/export."; \
+	  else \
+	    cd '$(CLIENT_DIR)' && python3 scripts/bootstrap_conan_deps.py; \
+	  fi; \
+	  exit 0; \
+	fi; \
+	need_venv=0; \
+	if [ ! -e '$(CLIENT_ENV)/bin/python3' ] || [ ! -x '$(CLIENT_ENV)/bin/python3' ]; then need_venv=1; \
+	elif ! '$(CLIENT_ENV)/bin/python3' -c 'import sys' >/dev/null 2>&1; then need_venv=1; \
+	elif ! '$(CLIENT_ENV)/bin/python3' -c 'import pip' >/dev/null 2>&1; then need_venv=1; \
+	elif [ -f '$(CLIENT_ENV)/pyvenv.cfg' ] && ! grep -qF '$(CLIENT_ENV)' '$(CLIENT_ENV)/pyvenv.cfg'; then need_venv=1; \
+	elif [ -x '$(CLIENT_CONAN)' ] && ! '$(CLIENT_CONAN)' --version >/dev/null 2>&1; then need_venv=1; \
+	fi; \
+	if [ "$$need_venv" = 1 ]; then \
+	  echo "Creating client venv at $(CLIENT_ENV) (system Conan unavailable)"; \
 	  rm -rf '$(CLIENT_ENV)'; \
-	  python3 -m venv '$(CLIENT_ENV)'; \
-	fi
-	'$(CLIENT_PYTHON)' -m pip install --disable-pip-version-check --upgrade pip conan
-	@if [ -f '$(CLIENT_DIR)/requirements.txt' ]; then \
+	  if ! python3 -m venv --without-pip '$(CLIENT_ENV)' 2>/dev/null \
+	     && ! python3 -m venv '$(CLIENT_ENV)'; then \
+	    echo "error: python3 -m venv failed for $(CLIENT_ENV)" >&2; exit 1; \
+	  fi; \
+	  if ! '$(CLIENT_ENV)/bin/python3' -c 'import pip' >/dev/null 2>&1; then \
+	    '$(CLIENT_ENV)/bin/python3' -c 'import ensurepip; ensurepip.bootstrap()' >/dev/null 2>&1 || true; \
+	  fi; \
+	  if ! '$(CLIENT_ENV)/bin/python3' -c 'import pip' >/dev/null 2>&1; then \
+	    echo "Bootstrapping pip into venv via get-pip.py"; \
+	    python3 -c 'import urllib.request; urllib.request.urlretrieve("https://bootstrap.pypa.io/get-pip.py","/tmp/tt-get-pip.py")'; \
+	    '$(CLIENT_ENV)/bin/python3' /tmp/tt-get-pip.py --disable-pip-version-check; \
+	  fi; \
+	  '$(CLIENT_ENV)/bin/python3' -c 'import pip' \
+	    || { echo "error: venv still has no pip after recreate" >&2; exit 1; }; \
+	fi; \
+	'$(CLIENT_PYTHON)' -m pip install --disable-pip-version-check --upgrade pip conan; \
+	if [ -f '$(CLIENT_DIR)/requirements.txt' ]; then \
 	  '$(CLIENT_PYTHON)' -m pip install --disable-pip-version-check -r '$(CLIENT_DIR)/requirements.txt'; \
+	fi; \
+	if [ ! -x '$(CLIENT_CONAN)' ] || ! '$(CLIENT_CONAN)' --version >/dev/null 2>&1; then \
+	  '$(CLIENT_PYTHON)' -m pip install --disable-pip-version-check --force-reinstall 'conan>=2.0.5'; \
+	fi; \
+	'$(CLIENT_CONAN)' --version >/dev/null \
+	  || { echo "error: conan still not runnable in $(CLIENT_ENV)" >&2; exit 1; }; \
+	PATH="$(CLIENT_ENV)/bin:$$PATH" '$(CLIENT_CONAN)' profile detect --force; \
+	if (cd '$(CLIENT_DIR)' && PATH="$(CLIENT_ENV)/bin:$$PATH" conan graph info . --profile:host=default >/dev/null 2>&1); then \
+	  echo "Conan dependencies already bootstrapped, skipping clone/export."; \
+	else \
+	  cd '$(CLIENT_DIR)' && PATH="$(CLIENT_ENV)/bin:$$PATH" '$(CLIENT_PYTHON)' scripts/bootstrap_conan_deps.py; \
 	fi
-	PATH="$(CLIENT_ENV)/bin:$$PATH" '$(CLIENT_CONAN)' profile detect --force
-	cd '$(CLIENT_DIR)' && PATH="$(CLIENT_ENV)/bin:$$PATH" '$(CLIENT_PYTHON)' scripts/bootstrap_conan_deps.py
 
 setup-android: setup-android-sdk setup-client
 	@rustup target add aarch64-linux-android armv7-linux-androideabi \
