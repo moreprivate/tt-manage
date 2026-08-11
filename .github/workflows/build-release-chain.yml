@@ -29,7 +29,7 @@ concurrency:
 
 env:
   BUILD_RUNNER: ${{ inputs.build_runner || 'github-hosted' }}
-  DELETE_EXISTING: ${{ inputs.delete_existing || (github.event_name == 'schedule') }}
+  DELETE_EXISTING: ${{ inputs.delete_existing || false }}
 
 jobs:
   server:

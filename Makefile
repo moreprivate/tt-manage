@@ -30,6 +30,8 @@ FLUTTER_GIT ?= https://github.com/flutter/flutter.git
 DOCKER_HOME := $(OUT_DIR)/docker-home
 DOCKER_GRADLE_HOME := $(OUT_DIR)/docker-gradle
 DOCKER_CARGO_HOME := $(OUT_DIR)/docker-cargo
+DOCKER_RUSTUP_HOME := $(OUT_DIR)/docker-rustup
+DOCKER_CONAN_HOME := $(OUT_DIR)/docker-conan
 DOCKER_PUB_CACHE := $(OUT_DIR)/docker-pub-cache
 # Tooling bootstrapped inside the container (same idea as CI RUNNER_TEMP/*).
 TOOL_FLUTTER := $(OUT_DIR)/flutter
@@ -41,14 +43,22 @@ C_FLUTTER := $(C_OUT)/flutter
 C_ANDROID_SDK := $(C_OUT)/android-sdk
 C_HOME := /tmp/tt-home
 C_CARGO := /tmp/tt-cargo
+C_RUSTUP := /tmp/tt-rustup
+C_CONAN := /tmp/tt-conan
 C_GRADLE := /tmp/tt-gradle
 C_PUB := /tmp/tt-pub
 
 CLIENT_ENV := $(CLIENT_DIR)/env
 CLIENT_PYTHON := $(CLIENT_ENV)/bin/python
 CLIENT_CONAN := $(CLIENT_ENV)/bin/conan
-CLIENT_VERSION ?= local
-SERVER_VERSION ?= local
+
+# Match the component workflows: release identity is the newest source commit
+# (excluding workflow-only edits), formatted as UTC timestamp plus short SHA.
+RELEASE_TAG_SCRIPT := $(CURDIR)/scripts/release-tag.sh
+SERVER_VERSION ?= $(shell '$(RELEASE_TAG_SCRIPT)' '$(SERVER_DIR)')
+CLIENT_VERSION ?= $(shell '$(RELEASE_TAG_SCRIPT)' '$(CLIENT_DIR)')
+MOBILE_VERSION ?= $(shell '$(RELEASE_TAG_SCRIPT)' '$(MOBILE_DIR)')
+MOBILE_VERSION_CODE ?= $(shell cd '$(MOBILE_DIR)' && epoch=$$(git show -s --format=%ct HEAD) && code=$$((epoch - 1577836800)) && test "$$code" -gt 0 && test "$$code" -le 2100000000 && printf '%s' "$$code")
 SERVER_ARCHES ?= x86_64 aarch64
 CLIENT_ARCHES ?= x86_64 aarch64 mipsel
 
@@ -114,7 +124,7 @@ help:
 	  '  make distclean      Delete all of $(OUT_DIR)/ (products + caches)' \
 	  '  make help           This message' \
 	  '' \
-	  'Products (kept by clean):  $(OUT_DIR)/server/  client/  tt-mobile-*-release.apk' \
+	  'Products (kept by clean):  $(OUT_DIR)/server/  client/  mobile/' \
 	  'Needs: Docker + image $(BUILD_IMAGE)' \
 	  'APK signing once:  cd ../tt-mobile && make aux-setup-android-signing' \
 	  '                   → $$HOME/.config/tt-mobile/' \
@@ -132,8 +142,9 @@ docker-prep:
 	@mkdir -p '$(OUT_DIR)' '$(DOCKER_HOME)' '$(DOCKER_HOME)/.config' '$(DOCKER_HOME)/.android' \
 	  '$(DOCKER_HOME)/.dart-tool' \
 	  '$(DOCKER_GRADLE_HOME)' '$(DOCKER_CARGO_HOME)' '$(DOCKER_PUB_CACHE)' \
+	  '$(DOCKER_RUSTUP_HOME)' '$(DOCKER_CONAN_HOME)' \
 	  '$(TOOL_FLUTTER)' '$(TOOL_ANDROID_SDK)' \
-	  '$(OUT_DIR)/server' '$(OUT_DIR)/client' '$(OUT_DIR)/android' '$(OUT_DIR)/host-cc' \
+	  '$(OUT_DIR)/server' '$(OUT_DIR)/client' '$(OUT_DIR)/mobile' '$(OUT_DIR)/host-cc' \
 	  '$(OUT_DIR)/zig/x86_64' '$(OUT_DIR)/zig/aarch64' \
 	  '$(HOST_TT_SIGN_DIR)'
 	@printf '%s\n' 'reporting=0' 'flutter-tool=1970-01-01,1' 'dart-tool=1970-01-01,1' \
@@ -156,7 +167,8 @@ docker-run: check-docker docker-prep
 	  -e USER=ttbuild \
 	  -e ANDROID_USER_HOME=$(C_HOME)/.android \
 	  -e CARGO_HOME=$(C_CARGO) \
-	  -e RUSTUP_HOME=/opt/rustup \
+	  -e RUSTUP_HOME=$(C_RUSTUP) \
+	  -e CONAN_HOME=$(C_CONAN) \
 	  -e GRADLE_USER_HOME=$(C_GRADLE) \
 	  -e PUB_CACHE=$(C_PUB) \
 	  -e PATH=$(C_CARGO)/bin:/opt/cargo/bin:/opt/zig:/usr/lib/llvm-21/bin:/opt/cmake/bin:$(C_FLUTTER)/bin:$(C_ANDROID_SDK)/cmdline-tools/latest/bin:$(C_ANDROID_SDK)/platform-tools:/usr/local/bin:/usr/bin:/bin \
@@ -174,12 +186,16 @@ docker-run: check-docker docker-prep
 	  -e CLIENT_ARCHES='$(CLIENT_ARCHES)' \
 	  -e SERVER_VERSION='$(SERVER_VERSION)' \
 	  -e CLIENT_VERSION='$(CLIENT_VERSION)' \
+	  -e MOBILE_VERSION='$(MOBILE_VERSION)' \
+	  -e MOBILE_VERSION_CODE='$(MOBILE_VERSION_CODE)' \
 	  -e FLUTTER_VERSION='$(FLUTTER_VERSION)' \
 	  -e HOST_TT_SIGN_DIR='$(HOST_TT_SIGN_DIR)' \
 	  -v '$(ROOT)':/workspace \
 	  -v '$(DOCKER_HOME)':$(C_HOME) \
 	  -v '$(DOCKER_GRADLE_HOME)':$(C_GRADLE) \
 	  -v '$(DOCKER_CARGO_HOME)':$(C_CARGO) \
+	  -v '$(DOCKER_RUSTUP_HOME)':$(C_RUSTUP) \
+	  -v '$(DOCKER_CONAN_HOME)':$(C_CONAN) \
 	  -v '$(DOCKER_PUB_CACHE)':$(C_PUB) \
 	  -v '$(HOST_TT_SIGN_DIR)':'$(HOST_TT_SIGN_DIR)':ro \
 	  -v '$(HOST_TT_SIGN_DIR)':$(C_HOME)/.config/tt-mobile:ro \
@@ -187,8 +203,16 @@ docker-run: check-docker docker-prep
 	  '$(BUILD_IMAGE)' \
 	  bash -euo pipefail -c '\
 	    mkdir -p "$$HOME" "$$HOME/.config" "$$HOME/.android" "$$HOME/.dart-tool" \
-	      "$$CARGO_HOME" "$$GRADLE_USER_HOME" "$$PUB_CACHE" \
-	      "$(C_OUT)/server" "$(C_OUT)/client" "$(C_FLUTTER)" "$(C_ANDROID_SDK)"; \
+	      "$$CARGO_HOME" "$$GRADLE_USER_HOME" "$$PUB_CACHE" "$$CONAN_HOME" \
+	      "$(C_OUT)/server" "$(C_OUT)/client" "$(C_FLUTTER)" "$(C_ANDROID_SDK)" "$$RUSTUP_HOME"; \
+	    echo "==> resetting isolated Conan state"; \
+	    find "$$CONAN_HOME" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +; \
+	    mkdir -p "$$CONAN_HOME"; \
+	    if ! compgen -G "$$RUSTUP_HOME/toolchains/*/bin/rustc" >/dev/null 2>&1 \
+	       && compgen -G "/opt/rustup/toolchains/*/bin/rustc" >/dev/null 2>&1; then \
+	      echo "==> copying image Rust toolchain metadata to writable cache"; \
+	      cp -a /opt/rustup/. "$$RUSTUP_HOME/"; \
+	    fi; \
 	    printf "%s\n" "reporting=0" "flutter-tool=1970-01-01,1" "dart-tool=1970-01-01,1" \
 	      > "$$HOME/.dart-tool/dart-flutter-telemetry.config"; \
 	    git config --global --add safe.directory /workspace/tt-server; \
@@ -200,6 +224,7 @@ docker-run: check-docker docker-prep
 	      NATIVE_BUILD=1 \
 	      SERVER_ARCHES="$$SERVER_ARCHES" CLIENT_ARCHES="$$CLIENT_ARCHES" \
 	      SERVER_VERSION="$$SERVER_VERSION" CLIENT_VERSION="$$CLIENT_VERSION" \
+	      MOBILE_VERSION="$$MOBILE_VERSION" MOBILE_VERSION_CODE="$$MOBILE_VERSION_CODE" \
 	      FLUTTER_VERSION="$$FLUTTER_VERSION" \
 	      ANDROID_HOME=$(C_ANDROID_SDK) ANDROID_SDK_ROOT=$(C_ANDROID_SDK) \
 	      FLUTTER=$(C_FLUTTER)/bin/flutter \
@@ -210,7 +235,7 @@ docker-run: check-docker docker-prep
 build build-chain:
 	@$(MAKE) docker-run GOAL=build-chain-native
 	@echo "==> Full build complete:"
-	@ls -lah '$(OUT_DIR)'/tt-mobile-*-release.apk '$(OUT_DIR)/tt-mobile-release.apk' 2>/dev/null || true
+	@ls -lah '$(OUT_DIR)/mobile' 2>/dev/null || true
 	@ls -lah '$(OUT_DIR)/server' '$(OUT_DIR)/client' 2>/dev/null || true
 
 build-router:
@@ -309,12 +334,15 @@ setup-android-sdk:
 
 setup-cross:
 	@command -v rustup >/dev/null || { echo 'missing rustup' >&2; exit 1; }
-	@rustup show active-toolchain >/dev/null 2>&1 \
-	  || { echo "error: no active Rust toolchain (RUSTUP_HOME=$${RUSTUP_HOME:-unset})" >&2; exit 1; }
+	@toolchain=$$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' '$(SERVER_DIR)/rust-toolchain.toml' | head -1); \
+	  test -n "$$toolchain" || { echo 'error: cannot read server Rust toolchain' >&2; exit 1; }; \
+	  rustup toolchain install "$$toolchain" --profile minimal; \
+	  for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do \
+	    rustup target add --toolchain "$$toolchain" "$$target"; \
+	    rustup target list --installed --toolchain "$$toolchain" | grep -qx "$$target" \
+	      || { echo "error: Rust target $$target missing from toolchain $$toolchain" >&2; exit 1; }; \
+	  done
 	@command -v cargo-zigbuild >/dev/null || cargo install --locked --version 0.22.3 cargo-zigbuild
-	@if [ -w "$${RUSTUP_HOME:-/opt/rustup}" ]; then \
-	  rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl; \
-	fi
 
 # Client Conan: prefer image/system `conan` (adguard/core-libs ships it). Fall back
 # to tt-client/env only when needed. That env is on a host↔Docker bind-mount, so a
@@ -406,12 +434,9 @@ build-server: check-cross setup-cross
 	  zig_dir='$(OUT_DIR)/zig/'"$$arch"; mkdir -p "$$zig_dir"; \
 	  ln -sf '$(CURDIR)/scripts/zig-compiler' "$$zig_dir/zig-cc"; \
 	  ln -sf '$(CURDIR)/scripts/zig-compiler' "$$zig_dir/zig-cxx"; \
-	  (cd '$(SERVER_DIR)' && env ZIG_TARGET="$$zig_target" CC="$$zig_dir/zig-cc" CXX="$$zig_dir/zig-cxx" \
-	    TT_ENDPOINT_VERSION='$(SERVER_VERSION)' \
-	    cargo zigbuild --release --locked --target "$$target" --bin trusttunnel_endpoint); \
-	  input="$(SERVER_DIR)/target/$$target/release/trusttunnel_endpoint"; \
 	  output="$(OUT_DIR)/server/tt-server-$(SERVER_VERSION)-linux-$$arch"; \
-	  llvm-strip -o "$$output" "$$input"; chmod 755 "$$output"; \
+	  (cd '$(SERVER_DIR)' && env CC="$$zig_dir/zig-cc" CXX="$$zig_dir/zig-cxx" \
+	    scripts/ci/build-musl-target.sh "$$arch" '$(SERVER_VERSION)' "$$output"); \
 	done
 
 build-client: check-cross setup-cross setup-client
@@ -427,6 +452,8 @@ build-client: check-cross setup-cross setup-client
 	client_path="$$wrap:$(CLIENT_ENV)/bin:$$PATH"; \
 	for arch in $(CLIENT_ARCHES); do \
 	  build_dir="cmake-build-musl-cross-$$arch-relwithdebinfo"; \
+	  rm -f '$(CLIENT_DIR)/'"$$build_dir"/.tt-configured \
+	    '$(CLIENT_DIR)/'"$$build_dir"/CMakeCache.txt; \
 	  (cd '$(CLIENT_DIR)' && PATH="$$client_path" TT_CLIENT_VERSION='$(CLIENT_VERSION)' SKIP_BOOTSTRAP=1 \
 	    $(MAKE) PRESET="musl-cross-""$$arch""-relwithdebinfo" BUILD_DIR="$$build_dir" build_trusttunnel_client); \
 	  input="$(CLIENT_DIR)/$$build_dir/trusttunnel/trusttunnel_client"; \
@@ -435,7 +462,7 @@ build-client: check-cross setup-cross setup-client
 	done
 
 build-android: setup-android
-	@mkdir -p '$(OUT_DIR)/android' '$(MOBILE_DIR)/third_party/tt-client-maven'
+	@mkdir -p '$(MOBILE_DIR)/third_party/tt-client-maven'
 	@rm -f '$(CLIENT_DIR)/platform/android/local.properties'
 	@printf 'sdk.dir=%s\ncmake.dir=%s\n' '$(ANDROID_SDK_ROOT)' '$(ANDROID_SDK_ROOT)/cmake/3.31.6' \
 	  > '$(CLIENT_DIR)/platform/android/local.properties'
@@ -508,16 +535,16 @@ build-mobile: setup-flutter build-android
 	ORG_GRADLE_PROJECT_signingConfigKeyPassword="$$ORG_GRADLE_PROJECT_signingConfigKeyPassword" \
 	ORG_GRADLE_PROJECT_signingConfigKeyStorePassword="$$ORG_GRADLE_PROJECT_signingConfigKeyStorePassword" \
 	'$(FLUTTER)' --suppress-analytics build apk --release --split-per-abi \
+	  --build-name='$(MOBILE_VERSION)' --build-number='$(MOBILE_VERSION_CODE)' \
 	  --dart-define="TT_CLIENT_VERSION=$(CLIENT_VERSION)"; \
-	mkdir -p '$(OUT_DIR)'; \
+	mkdir -p '$(OUT_DIR)/mobile'; \
 	out='$(MOBILE_DIR)/build/app/outputs/flutter-apk'; \
 	for abi in arm64-v8a armeabi-v7a x86_64; do \
 	  src="$$out/app-$$abi-release.apk"; \
-	  if [ -f "$$src" ]; then cp "$$src" '$(OUT_DIR)'/tt-mobile-$$abi-release.apk; fi; \
+	  if [ -f "$$src" ]; then cp "$$src" '$(OUT_DIR)/mobile'/tt-mobile-$(MOBILE_VERSION)-$$abi-release.apk; fi; \
 	done; \
-	test -f '$(OUT_DIR)/tt-mobile-arm64-v8a-release.apk'; \
-	cp '$(OUT_DIR)/tt-mobile-arm64-v8a-release.apk' '$(OUT_DIR)/tt-mobile-release.apk'; \
-	ls -lah '$(OUT_DIR)'/tt-mobile-*-release.apk
+	test -f '$(OUT_DIR)/mobile/tt-mobile-$(MOBILE_VERSION)-arm64-v8a-release.apk'; \
+	ls -lah '$(OUT_DIR)/mobile'/tt-mobile-*-release.apk
 
 build-router-native: check-cross
 	$(MAKE) build-server
@@ -543,7 +570,7 @@ clean:
 	  '$(OUT_DIR)/docker-home' '$(OUT_DIR)/docker-gradle' \
 	  '$(OUT_DIR)/docker-cargo' '$(OUT_DIR)/docker-pub-cache' \
 	  '$(OUT_DIR)/flutter-tools-dart' '$(OUT_DIR)/flutter-bin-cache' \
-	  '$(OUT_DIR)/host-cc' '$(OUT_DIR)/zig' '$(OUT_DIR)/android' \
+	  '$(OUT_DIR)/host-cc' '$(OUT_DIR)/zig' \
 	  '$(OUT_DIR)/test-sdk' 2>/dev/null || true
 	@# Sibling intermediate trees
 	@rm -rf '$(SERVER_DIR)/target' \
@@ -559,8 +586,8 @@ clean:
 	@rm -f '$(CLIENT_DIR)/platform/android/local.properties' \
 	  '$(MOBILE_DIR)/android/local.properties' \
 	  '$(MOBILE_DIR)/.flutter-plugins-dependencies' 2>/dev/null || true
-	@mkdir -p '$(OUT_DIR)/server' '$(OUT_DIR)/client'
-	@echo "==> clean: caches cleared; products kept in $(OUT_DIR)/{server,client,*.apk}"
+	@mkdir -p '$(OUT_DIR)/server' '$(OUT_DIR)/client' '$(OUT_DIR)/mobile'
+	@echo "==> clean: caches cleared; products kept in $(OUT_DIR)/{server,client,mobile}"
 
 # Full wipe when you really want a cold start (products + tool caches).
 distclean: clean
