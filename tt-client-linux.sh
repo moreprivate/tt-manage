@@ -104,7 +104,7 @@ download_binary() {
   echo "$tag" | grep -qE '^[A-Za-z0-9._-]+$' || die "invalid release tag: $tag"
   arch="$(release_arch)"; asset="tt-client-${tag}-linux-${arch}"
   stage="${TT_DIR}/download.$$"; mkdir -p "$stage"
-  log "download https://github.com/${GITHUB_REPO}/releases/download/${tag}/${asset}"
+  log "download https://github.com/${GITHUB_REPO}/releases/download/${tag}/${asset}" >&2
   http_fetch "https://github.com/${GITHUB_REPO}/releases/download/${tag}/${asset}" "$stage/$asset" \
     || { rm -rf "$stage"; die "binary download failed"; }
   http_fetch "https://github.com/${GITHUB_REPO}/releases/download/${tag}/${asset}.sha256" "$stage/$asset.sha256" \
@@ -114,14 +114,13 @@ download_binary() {
   chmod 755 "$stage/$asset"
   actual="$($stage/$asset --version 2>/dev/null)" || { rm -rf "$stage"; die "downloaded binary is not runnable"; }
   embedded="${actual#trusttunnel_client }"
-  echo "$embedded" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$' \
+  echo "$embedded" | grep -qE '^[0-9]{8}T[0-9]{6}Z-[0-9a-fA-F]{12}$' \
     || { rm -rf "$stage"; die "downloaded client reported invalid embedded version: $actual"; }
-  if echo "$tag" | grep -qE '^v?[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$'; then
-    expected="${tag#v}"
-    [ "$embedded" = "$expected" ] \
-      || { rm -rf "$stage"; die "embedded version '$embedded' does not match semver release tag '$tag'"; }
-  fi
-  log "embedded client version: $embedded"
+  echo "$tag" | grep -qE '^[0-9]{8}T[0-9]{6}Z-[0-9a-fA-F]{12}$' \
+    || { rm -rf "$stage"; die "invalid release tag format: $tag"; }
+  [ "$embedded" = "$tag" ] \
+    || { rm -rf "$stage"; die "embedded version '$embedded' does not match release tag '$tag'"; }
+  log "embedded client version: $embedded" >&2
   echo "$stage/$asset"
 }
 

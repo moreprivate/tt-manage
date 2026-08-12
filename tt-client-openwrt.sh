@@ -612,14 +612,13 @@ download_release_binary() {
   actual="$("${stage}/${asset}" --version 2>/dev/null)" \
     || { rm -rf "$stage"; die "downloaded client binary is not runnable"; }
   embedded="${actual#trusttunnel_client }"
-  echo "$embedded" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$' \
+  echo "$embedded" | grep -qE '^[0-9]{8}T[0-9]{6}Z-[0-9a-fA-F]{12}$' \
     || { rm -rf "$stage"; die "downloaded client reported invalid embedded version '${actual}'"; }
-  if echo "$tag" | grep -qE '^v?[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$'; then
-    expected="${tag#v}"
-    [ "$embedded" = "$expected" ] \
-      || { rm -rf "$stage"; die "embedded version '${embedded}' does not match semver release tag '${tag}'"; }
-  fi
-  log "embedded client version: ${embedded}"
+  echo "$tag" | grep -qE '^[0-9]{8}T[0-9]{6}Z-[0-9a-fA-F]{12}$' \
+    || { rm -rf "$stage"; die "invalid release tag format: '${tag}'"; }
+  [ "$embedded" = "$tag" ] \
+    || { rm -rf "$stage"; die "embedded version '${embedded}' does not match release tag '${tag}'"; }
+  log "embedded client version: ${embedded}" >&2
   echo "${stage}/${asset}"
 }
 

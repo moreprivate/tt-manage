@@ -466,14 +466,13 @@ download_release() {
   chmod 0755 "${tmp}/${asset}"
   actual="$("${tmp}/${asset}" --version 2>/dev/null)" \
     || { rm -rf "$tmp"; die "downloaded endpoint binary is not runnable"; }
-  [[ "$actual" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]] \
+  [[ "$actual" =~ ^[0-9]{8}T[0-9]{6}Z-[0-9a-fA-F]{12}$ ]] \
     || { rm -rf "$tmp"; die "downloaded endpoint reported invalid embedded version '${actual}'"; }
-  if [[ "$ver" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
-    expected="${ver#v}"
-    [[ "$actual" == "$expected" ]] \
-      || { rm -rf "$tmp"; die "embedded version '${actual}' does not match semver release tag '${ver}'"; }
-  fi
-  log "embedded endpoint version: ${actual}"
+  [[ "$ver" =~ ^[0-9]{8}T[0-9]{6}Z-[0-9a-fA-F]{12}$ ]] \
+    || { rm -rf "$tmp"; die "invalid release tag format: '${ver}'"; }
+  [[ "$actual" == "$ver" ]] \
+    || { rm -rf "$tmp"; die "embedded version '${actual}' does not match release tag '${ver}'"; }
+  log "embedded endpoint version: ${actual}" >&2
   echo "${tmp}/${asset}"
 }
 
