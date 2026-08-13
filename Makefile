@@ -9,7 +9,7 @@
 #   make help           this list
 #
 # Host: Docker only (+ $HOME/.config/tt-mobile for APK signing).
-# Image: adguard/core-libs:2.12. Tools live under .tt-build/ (not ~/flutter).
+# Image: pinned adguard/core-libs digest. Tools live under .tt-build/ (not ~/flutter).
 
 SHELL := /bin/bash
 .SHELLFLAGS := -euo pipefail -c
@@ -20,7 +20,7 @@ CLIENT_DIR := $(ROOT)/tt-client
 MOBILE_DIR := $(ROOT)/tt-mobile
 OUT_DIR ?= $(ROOT)/.tt-build
 DOCKER ?= docker
-BUILD_IMAGE ?= adguard/core-libs:2.12
+BUILD_IMAGE ?= adguard/core-libs@sha256:26f7e1c6c19b1e2c90a8938e6c763469787fbaeff94f8c5a887b947aa8858f5e
 
 # Pinned the same way as tt-mobile CI (build-mobile-targets.yml).
 FLUTTER_VERSION ?= 3.44.8
@@ -62,7 +62,7 @@ MOBILE_VERSION_CODE ?= $(shell cd '$(MOBILE_DIR)' && epoch=$$(git show -s --form
 SERVER_ARCHES ?= x86_64 aarch64
 CLIENT_ARCHES ?= x86_64 aarch64 mipsel
 
-# Image layout (adguard/core-libs:2.12)
+# Image layout (pinned adguard/core-libs digest)
 IMAGE_ANDROID_SDK := /storage/android-sdk
 IMAGE_SDKMANAGER := $(IMAGE_ANDROID_SDK)/cmdline-tools/latest/bin/sdkmanager
 IMAGE_NDK := $(IMAGE_ANDROID_SDK)/ndk/29.0.14206865
@@ -436,6 +436,7 @@ build-server: check-cross setup-cross
 	  ln -sf '$(CURDIR)/scripts/zig-compiler' "$$zig_dir/zig-cxx"; \
 	  output="$(OUT_DIR)/server/tt-server-$(SERVER_VERSION)-linux-$$arch"; \
 	  (cd '$(SERVER_DIR)' && env CC="$$zig_dir/zig-cc" CXX="$$zig_dir/zig-cxx" \
+	    RUSTFLAGS='--remap-path-prefix=/__w/tt-server/tt-server=/tt-server --remap-path-prefix=/workspace/tt-server=/tt-server --remap-path-prefix=/opt/cargo=/cargo --remap-path-prefix=/tmp/tt-cargo=/cargo' \
 	    scripts/ci/build-musl-target.sh "$$arch" '$(SERVER_VERSION)' "$$output"); \
 	done
 
@@ -514,6 +515,7 @@ build-mobile: setup-flutter build-android
 	fi; \
 	export PATH="$(FLUTTER_BIN):$(CLIENT_ENV)/bin:$$PATH"; \
 	export FLUTTER_SUPPRESS_ANALYTICS=true CI=true; \
+	export SOURCE_DATE_EPOCH="$$(cd '$(MOBILE_DIR)' && git show -s --format=%ct HEAD)"; \
 	export ANDROID_HOME='$(ANDROID_SDK_ROOT)' ANDROID_SDK_ROOT='$(ANDROID_SDK_ROOT)'; \
 	mkdir -p "$${HOME}/.dart-tool"; \
 	printf '%s\n' 'reporting=0' > "$${HOME}/.dart-tool/dart-flutter-telemetry.config"; \
@@ -524,10 +526,7 @@ build-mobile: setup-flutter build-android
 	mkdir -p '$(MOBILE_DIR)/android'; \
 	printf 'sdk.dir=%s\n' '$(ANDROID_SDK_ROOT)' > '$(MOBILE_DIR)/android/local.properties'; \
 	cd '$(MOBILE_DIR)'; \
-	'$(FLUTTER)' --suppress-analytics pub get; \
-	test -f .dart_tool/package_config.json; \
-	$(MAKE) gen; \
-	$(MAKE) ln; \
+	$(MAKE) init; \
 	test -f .dart_tool/package_config.json; \
 	ORG_GRADLE_PROJECT_ttClientVersion='$(CLIENT_VERSION)' \
 	ORG_GRADLE_PROJECT_signingConfigKeyStorePath="$$ORG_GRADLE_PROJECT_signingConfigKeyStorePath" \
