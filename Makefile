@@ -42,9 +42,9 @@ C_OUT := /workspace/.tt-build
 C_FLUTTER := $(C_OUT)/flutter
 C_ANDROID_SDK := $(C_OUT)/android-sdk
 C_HOME := /tmp/tt-home
-C_CARGO := /tmp/tt-cargo
+C_CARGO := /opt/cargo
 C_RUSTUP := /tmp/tt-rustup
-C_CONAN := /tmp/tt-conan
+C_CONAN := /conan
 C_GRADLE := /tmp/tt-gradle
 C_PUB := /tmp/tt-pub
 
@@ -436,7 +436,7 @@ build-server: check-cross setup-cross
 	  ln -sf '$(CURDIR)/scripts/zig-compiler' "$$zig_dir/zig-cxx"; \
 	  output="$(OUT_DIR)/server/tt-server-$(SERVER_VERSION)-linux-$$arch"; \
 	  (cd '$(SERVER_DIR)' && env CC="$$zig_dir/zig-cc" CXX="$$zig_dir/zig-cxx" \
-	    RUSTFLAGS='--remap-path-prefix=/__w/tt-server/tt-server=/tt-server --remap-path-prefix=/workspace/tt-server=/tt-server --remap-path-prefix=/opt/cargo=/cargo --remap-path-prefix=/tmp/tt-cargo=/cargo' \
+	    RUSTFLAGS='--remap-path-prefix=/__w/tt-server/tt-server=/tt-server --remap-path-prefix=/workspace/tt-server=/tt-server' \
 	    scripts/ci/build-musl-target.sh "$$arch" '$(SERVER_VERSION)' "$$output"); \
 	done
 
