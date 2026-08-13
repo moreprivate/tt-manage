@@ -7,11 +7,11 @@ set -e
 VERSION_SCRIPT="0.6.8"
 
 # Fixed layout — self-contained (only sibling: tt-server.sh on the VPS).
-TT_DIR="/etc/trusttunnel"
+TT_DIR="/etc/moreprivate/tt-client"
 CLIENT_TOML="${TT_DIR}/client.toml"
-BIN="/usr/bin/trusttunnel_client"
-INIT="/etc/init.d/trusttunnel"
-GUARD_INIT="/etc/init.d/trusttunnel-guard"
+BIN="/usr/bin/tt-client"
+INIT="/etc/init.d/tt-client"
+GUARD_INIT="/etc/init.d/tt-client-guard"
 PBR_NFT="${TT_DIR}/policy.nft"
 FAILSAFE_NFT="${TT_DIR}/failsafe.nft"
 DIRECT_EL="${TT_DIR}/direct-elements.nft"
@@ -97,7 +97,7 @@ has_install_artifacts() {
       return 0
     fi
   done
-  for f in /usr/bin/trusttunnel_client-*-linux-*; do
+  for f in /usr/bin/tt-client-*-linux-*; do
     [ -e "$f" ] && return 0
   done
   client_running && return 0
@@ -576,6 +576,20 @@ release_arch() {
   esac
 }
 
+# Preserve the published asset's original release identity for both downloaded
+# and user-supplied binaries. Never invent a "local-<hash>" filename.
+binary_tag_from_file() {
+  local base="$(basename "$1")" tag=""
+  case "$base" in
+    tt-client-*-linux-*)
+      tag="${base#tt-client-}"
+      tag="${tag%-linux-*}"
+      ;;
+  esac
+  [ -n "$tag" ] || die "binary filename must be a release asset (expected tt-client-<tag>-linux-<arch>): $base"
+  printf '%s' "$tag"
+}
+
 resolve_latest_version() {
   local stage json tag
   stage="${TT_DIR}/.release-latest.$$"
@@ -895,13 +909,13 @@ STOP=10
 USE_PROCD=1
 
 start_service() {
-	/etc/init.d/trusttunnel-guard check >/dev/null 2>&1 \
+	/etc/init.d/tt-client-guard check >/dev/null 2>&1 \
 		|| {
-			/etc/init.d/trusttunnel-guard start || return 1
-			/etc/init.d/trusttunnel-guard check >/dev/null 2>&1 || return 1
+			/etc/init.d/tt-client-guard start || return 1
+			/etc/init.d/tt-client-guard check >/dev/null 2>&1 || return 1
 		}
 	procd_open_instance
-	procd_set_param command /usr/bin/trusttunnel_client -c /etc/trusttunnel/client.toml
+	procd_set_param command /usr/bin/tt-client -c /etc/moreprivate/tt-client/client.toml
 	procd_set_param respawn 3600 5 0
 	procd_set_param stdout 1
 	procd_set_param stderr 1
@@ -921,10 +935,10 @@ STOP=99
 EXTRA_COMMANDS="check"
 EXTRA_HELP="	check	Verify the complete fail-closed policy"
 
-POLICY="/etc/trusttunnel/policy.nft"
-FAILSAFE="/etc/trusttunnel/failsafe.nft"
-WAN_DEV_FILE="/etc/trusttunnel/wan.dev"
-FAILED="/etc/trusttunnel/policy.failed"
+POLICY="${TT_DIR}/policy.nft"
+FAILSAFE="${TT_DIR}/failsafe.nft"
+WAN_DEV_FILE="${TT_DIR}/wan.dev"
+FAILED="${TT_DIR}/policy.failed"
 MARK="${MARK}"
 MARK_PRIO="${MARK_PRIO}"
 
@@ -1080,7 +1094,7 @@ else
 fi
 if ! nft list chain inet trusttunnel trusttunnel_output_guard >/dev/null 2>&1 \
   || ! nft list chain inet trusttunnel trusttunnel_forward_guard >/dev/null 2>&1; then
-  /etc/init.d/trusttunnel-guard start || {
+  /etc/init.d/tt-client-guard start || {
     logger -p daemon.crit -t trusttunnel-guard \
       "policy unavailable on \${INTERFACE}; disabling \${event_dev:-${wan_dev}}"
     ip link set "\${event_dev:-${wan_dev}}" down 2>/dev/null || true
@@ -1459,9 +1473,9 @@ EOF
 write_tt_dns() {
   cat >"$TT_DNS" <<'EOF'
 #!/bin/sh
-# Static dnsmasq split. Config: /etc/trusttunnel/dns.env
+# Static dnsmasq split. Config: /etc/moreprivate/tt-client/dns.env
 set -e
-CONF="${TT_DNS_ENV:-/etc/trusttunnel/dns.env}"
+CONF="${TT_DNS_ENV:-/etc/moreprivate/tt-client/dns.env}"
 normalize_list() {
   echo "$1" | tr ',\t' '  ' | tr -s ' ' | sed 's/^ //;s/ $//'
 }
@@ -1590,7 +1604,7 @@ service_stop() {
   done
   if client_running; then
     log "client still running after stop — sending TERM"
-    pids="$(pidof trusttunnel_client 2>/dev/null || true)"
+    pids="$(pidof tt-client 2>/dev/null || true)"
     if [ -n "$pids" ]; then
       # shellcheck disable=SC2086
       kill -TERM $pids 2>/dev/null || true
@@ -1599,7 +1613,7 @@ service_stop() {
   fi
   if client_running; then
     log "client still running after TERM — sending KILL"
-    pids="$(pidof trusttunnel_client 2>/dev/null || true)"
+    pids="$(pidof tt-client 2>/dev/null || true)"
     if [ -n "$pids" ]; then
       # shellcheck disable=SC2086
       kill -KILL $pids 2>/dev/null || true
@@ -1698,7 +1712,7 @@ binary_resolve_link() {
     *) target="$(dirname "$BIN")/$target" ;;
   esac
   case "$target" in
-    /usr/bin/trusttunnel_client-*-linux-*) ;;
+    /usr/bin/tt-client-*-linux-*) ;;
     *) return 1 ;;
   esac
   [ -x "$target" ] || return 1
@@ -1714,7 +1728,7 @@ binary_switch_link() {
 
 binary_previous() {
   local current="$1" f found=""
-  for f in /usr/bin/trusttunnel_client-*-linux-*; do
+  for f in /usr/bin/tt-client-*-linux-*; do
     [ -f "$f" ] && [ -x "$f" ] && [ "$f" != "$current" ] || continue
     [ -z "$found" ] || die "multiple rollback binaries found; run upgrade to prune them"
     found="$f"
@@ -1767,7 +1781,7 @@ binary_tx_rollback() {
 binary_tx_commit() {
   local keep="$1" previous="${2:-}" f
   [ "$_BIN_TX_ACTIVE" = 1 ] || return 0
-  for f in /usr/bin/trusttunnel_client-*-linux-*; do
+  for f in /usr/bin/tt-client-*-linux-*; do
     [ -e "$f" ] || continue
     [ "$f" = "$keep" ] || [ "$f" = "$previous" ] || rm -f "$f"
   done
@@ -1783,13 +1797,16 @@ binary_tx_on_exit() {
 }
 
 install_binary() {
-  local src="$1" tag="$2" arch target src_sum target_sum
+  local src="$1" tag="$2" target src_sum target_sum
   need_file "$src"
   [ -s "$src" ] || die "binary empty: $src"
   service_stop
   echo "$tag" | grep -qE '^[A-Za-z0-9._-]+$' || die "invalid binary version: ${tag}"
-  arch="$(release_arch)"
-  target="/usr/bin/trusttunnel_client-${tag}-linux-${arch}"
+  target="/usr/bin/$(basename "$src")"
+  case "$(basename "$src")" in
+    "tt-client-${tag}-linux-"*) ;;
+    *) die "binary filename does not match its release tag: $(basename "$src")" ;;
+  esac
   if [ -e "$target" ]; then
     [ -f "$target" ] && [ -x "$target" ] || die "invalid versioned binary: $target"
     src_sum="$(sha256sum "$src" | awk '{print $1}')"
@@ -2232,9 +2249,9 @@ status_report_transport() {
 
 client_pids() {
   if command -v pidof >/dev/null 2>&1; then
-    pidof trusttunnel_client 2>/dev/null || true
+    pidof tt-client 2>/dev/null || true
   elif command -v pgrep >/dev/null 2>&1; then
-    pgrep -f '^/usr/bin/trusttunnel_client([[:space:]]|$)' 2>/dev/null || true
+    pgrep -f '^/usr/bin/tt-client([[:space:]]|$)' 2>/dev/null || true
   fi
 }
 
@@ -2742,8 +2759,9 @@ cmd_install() {
     binary_tag="$version"
     release_source="github:${GITHUB_REPO}"
   else
-    binary_tag="local-$(sha256sum "$binary" | awk '{print $1}')"
-    release_source=local
+    binary_tag="$(binary_tag_from_file "$binary")"
+    version="$binary_tag"
+    release_source=file
   fi
 
   vps_ip="$(parse_vps_ip "$config")" || die "bad config: no VPS IPv4"
@@ -2888,8 +2906,9 @@ cmd_upgrade() {
 
   if [ -n "$binary" ]; then
     need_file "$binary"
-    binary_tag="local-$(sha256sum "$binary" | awk '{print $1}')"
-    release_source=local
+    binary_tag="$(binary_tag_from_file "$binary")"
+    version="$binary_tag"
+    release_source=file
   else
     command -v wget >/dev/null 2>&1 \
       || command -v uclient-fetch >/dev/null 2>&1 \
@@ -2905,7 +2924,7 @@ cmd_upgrade() {
 
   current="$(binary_resolve_link)" \
     || die "managed binary symlink missing or invalid — run install"
-  target="/usr/bin/trusttunnel_client-${binary_tag}-linux-$(release_arch)"
+  target="/usr/bin/$(basename "$binary")"
   if [ "$current" = "$target" ]; then
     src_sum="$(sha256sum "$binary" | awk '{print $1}')"
     current_sum="$(sha256sum "$current" | awk '{print $1}')"
@@ -3760,7 +3779,7 @@ cmd_purge() {
   rm -f "$INIT" "$GUARD_INIT"
   rm -f /etc/rc.d/*trusttunnel* 2>/dev/null || true
   rm -f "$BIN" "${BIN}.link."*
-  rm -f /usr/bin/trusttunnel_client-*-linux-*
+  rm -f /usr/bin/tt-client-*-linux-*
   # Independent kill switch + hotplug must go before ordinary WAN is restored.
   nft destroy table inet trusttunnel 2>/dev/null || true
   rm -f "$PBR_NFT" "$HOTPLUG"
@@ -3840,7 +3859,7 @@ cmd_purge() {
       echo "  ok    gone $f"
     fi
   done
-  if find /usr/bin -maxdepth 1 -type f -name 'trusttunnel_client-*-linux-*' \
+  if find /usr/bin -maxdepth 1 -type f -name 'tt-client-*-linux-*' \
     | grep -q .; then
     echo "  FAIL  versioned client binaries remain"; left=$((left + 1))
   else

@@ -4,14 +4,16 @@
 set -eu
 
 VERSION_SCRIPT="0.1.2"
-TT_DIR="/etc/trusttunnel"
+TT_DIR="/etc/moreprivate/tt-client"
 CLIENT_TOML="${TT_DIR}/client.toml"
 DIRECT_CONF="${TT_DIR}/direct.conf"
 RELEASE_META="${TT_DIR}/release.env"
-POLICY="/usr/local/libexec/trusttunnel-linux-policy"
-BIN="/usr/local/bin/trusttunnel_client"
-INIT="/etc/systemd/system/trusttunnel.service"
-GUARD_INIT="/etc/systemd/system/trusttunnel-guard.service"
+POLICY="/usr/local/libexec/moreprivate-tt-client-policy"
+BIN="/usr/local/bin/tt-client"
+INIT="/etc/systemd/system/tt-client.service"
+GUARD_INIT="/etc/systemd/system/tt-client-guard.service"
+SERVICE_NAME="tt-client"
+GUARD_SERVICE_NAME="tt-client-guard"
 GITHUB_REPO="${TT_GITHUB_REPO:-moreprivate/tt-client}"
 MARK="0x8802"
 MARK_PRIO="20000"
@@ -124,14 +126,30 @@ download_binary() {
   echo "$stage/$asset"
 }
 
+binary_tag_from_file() {
+  local base="$(basename "$1")" tag=""
+  case "$base" in
+    tt-client-*-linux-*)
+      tag="${base#tt-client-}"
+      tag="${tag%-linux-*}"
+      ;;
+  esac
+  [ -n "$tag" ] || die "binary filename must be a release asset (expected tt-client-<tag>-linux-<arch>): $base"
+  printf '%s' "$tag"
+}
+
 binary_target() {
-  local tag="$1"; echo "/usr/local/bin/trusttunnel_client-${tag}-linux-$(release_arch)";
+  printf '/usr/local/bin/%s' "$(basename "$1")"
 }
 
 install_binary() {
   local src="$1" tag="$2" target
   need_file "$src"; [ -s "$src" ] || die "binary is empty"
-  target="$(binary_target "$tag")"
+  target="$(binary_target "$src")"
+  case "$(basename "$src")" in
+    "tt-client-${tag}-linux-"*) ;;
+    *) die "binary filename does not match its release tag: $(basename "$src")" ;;
+  esac
   if [ -e "$target" ]; then
     [ "$(sha256sum "$src" | awk '{print $1}')" = "$(sha256sum "$target" | awk '{print $1}')" ] || die "binary collision: $target"
   else
@@ -148,7 +166,7 @@ save_meta() {
   chmod 600 "$tmp"; mv -f "$tmp" "$RELEASE_META"
 }
 
-client_pids() { pgrep -f '^/usr/local/bin/trusttunnel_client([[:space:]]|$)' 2>/dev/null || true; }
+client_pids() { pgrep -f '^/usr/local/bin/tt-client([[:space:]]|$)' 2>/dev/null || true; }
 client_running() { [ -n "$(client_pids)" ]; }
 
 write_client_config() {
@@ -215,9 +233,9 @@ write_units() {
   cat >"$INIT" <<EOF
 [Unit]
 Description=TrustTunnel local client
-After=network-online.target trusttunnel-guard.service
+After=network-online.target tt-client-guard.service
 Wants=network-online.target
-Requires=trusttunnel-guard.service
+Requires=tt-client-guard.service
 
 [Service]
 Type=simple
@@ -237,7 +255,7 @@ EOF
   cat >"$GUARD_INIT" <<EOF
 [Unit]
 Description=TrustTunnel local fail-closed policy
-Before=trusttunnel.service
+Before=tt-client.service
 After=network-pre.target
 Wants=network-pre.target
 
@@ -271,16 +289,16 @@ verify() {
   echo "  route: $route"
 }
 
-service_start() { systemctl enable --now trusttunnel.service >/dev/null; }
-service_stop() { systemctl stop trusttunnel.service >/dev/null 2>&1 || true; }
-service_restart() { systemctl restart trusttunnel.service; }
+service_start() { systemctl enable --now "$SERVICE_NAME.service" >/dev/null; }
+service_stop() { systemctl stop "$SERVICE_NAME.service" >/dev/null 2>&1 || true; }
+service_restart() { systemctl restart "$SERVICE_NAME.service"; }
 
 upgrade_rollback() {
   local rc="$?"
   if [ "$rc" -ne 0 ] && [ -n "${OLD_BIN:-}" ] && [ -x "$OLD_BIN" ]; then
     service_stop
     ln -sfn "$(basename "$OLD_BIN")" "$BIN"
-    systemctl start trusttunnel.service >/dev/null 2>&1 || true
+    systemctl start "$SERVICE_NAME.service" >/dev/null 2>&1 || true
     [ -z "${NEW_BIN:-}" ] || [ "$NEW_BIN" = "$OLD_BIN" ] || rm -f "$NEW_BIN"
     echo "WARNING: upgrade failed; restored $(basename "$OLD_BIN")" >&2
   fi
@@ -291,12 +309,12 @@ cmd_install() {
   local config="" binary="" tag="" src source vps port uplink
   while [ "$#" -gt 0 ]; do case "$1" in --config) config="$2"; shift 2;; --binary) binary="$2"; shift 2;; --version) tag="$2"; shift 2;; *) die "unknown install option: $1";; esac; done
   [ -n "$config" ] || die "install requires --config FILE"; [ ! -e "$CLIENT_TOML" ] || die "already installed; use upgrade or purge"
-  trap 'rc=$?; if [ "$rc" -ne 0 ]; then systemctl stop trusttunnel.service >/dev/null 2>&1 || true; systemctl disable trusttunnel.service trusttunnel-guard.service >/dev/null 2>&1 || true; "$POLICY" stop >/dev/null 2>&1 || true; rm -f "$INIT" "$GUARD_INIT" "$POLICY" "$CLIENT_TOML" "$DIRECT_CONF" "$RELEASE_META" "$BIN"; rm -f /usr/local/bin/trusttunnel_client-*-linux-*; systemctl daemon-reload >/dev/null 2>&1 || true; fi; exit "$rc"' EXIT
+  trap 'rc=$?; if [ "$rc" -ne 0 ]; then systemctl stop "$SERVICE_NAME.service" >/dev/null 2>&1 || true; systemctl disable "$SERVICE_NAME.service" "$GUARD_SERVICE_NAME.service" >/dev/null 2>&1 || true; "$POLICY" stop >/dev/null 2>&1 || true; rm -f "$INIT" "$GUARD_INIT" "$POLICY" "$CLIENT_TOML" "$DIRECT_CONF" "$RELEASE_META" "$BIN"; rm -f /usr/local/bin/tt-client-*-linux-*; systemctl daemon-reload >/dev/null 2>&1 || true; fi; exit "$rc"' EXIT
   need_file "$config"; mkdir -p "$TT_DIR" /usr/local/libexec
   vps="$(parse_vps_ip "$config")"; port="$(parse_vps_port "$config")"; uplink="$(uplink_dev "$vps")"; [ -n "$uplink" ] || die "cannot determine uplink for endpoint"
-  if [ -n "$binary" ]; then src="$binary"; source=local; tag="${tag:-$(basename "$binary")}"; else tag="${tag:-$(latest_tag)}"; src="$(download_binary "$tag")"; source="github:${GITHUB_REPO}"; fi
+  if [ -n "$binary" ]; then src="$binary"; source=local; tag="${tag:-$(binary_tag_from_file "$binary")}"; else tag="${tag:-$(latest_tag)}"; src="$(download_binary "$tag")"; source="github:${GITHUB_REPO}"; fi
   write_client_config "$config"; install_binary "$src" "$tag"; write_policy "$vps" "$port" "$uplink"; write_units; save_meta "$source" "$tag"
-  systemctl daemon-reload; systemctl enable trusttunnel-guard.service >/dev/null; service_start
+  systemctl daemon-reload; systemctl enable "$GUARD_SERVICE_NAME.service" >/dev/null; service_start
   wait_tunnel || die "TrustTunnel did not create tun0"; verify "$vps"; trap - EXIT; log "install complete"
 }
 
@@ -306,16 +324,16 @@ cmd_upgrade() {
   while [ "$#" -gt 0 ]; do case "$1" in --binary) binary="$2"; shift 2;; --version) tag="$2"; shift 2;; *) die "unknown upgrade option: $1";; esac; done
   OLD_BIN="$(readlink -f "$BIN")"; NEW_BIN=""; trap upgrade_rollback EXIT
   vps="$(parse_vps_ip "$CLIENT_TOML")"; port="$(parse_vps_port "$CLIENT_TOML")"; uplink="$(uplink_dev "$vps")"
-  if [ -n "$binary" ]; then src="$binary"; source=local; tag="${tag:-$(basename "$binary")}"; else tag="${tag:-$(latest_tag)}"; src="$(download_binary "$tag")"; source="github:${GITHUB_REPO}"; fi
+  if [ -n "$binary" ]; then src="$binary"; source=local; tag="${tag:-$(binary_tag_from_file "$binary")}"; else tag="${tag:-$(latest_tag)}"; src="$(download_binary "$tag")"; source="github:${GITHUB_REPO}"; fi
   service_stop; install_binary "$src" "$tag"; NEW_BIN="$(readlink -f "$BIN")"; write_policy "$vps" "$port" "$uplink"; write_units; save_meta "$source" "$tag"; systemctl daemon-reload; service_start; wait_tunnel || die "upgrade did not restore tun0"; verify "$vps"; trap - EXIT
 }
 
 cmd_update_creds() { local cfg="$2"; [ "$1" = --config ] || die "update-creds requires --config FILE"; write_client_config "$cfg"; service_restart; }
-cmd_enable() { systemctl enable --now trusttunnel.service; }
-cmd_disable() { systemctl disable --now trusttunnel.service; }
+cmd_enable() { systemctl enable --now "$SERVICE_NAME.service"; }
+cmd_disable() { systemctl disable --now "$SERVICE_NAME.service"; }
 cmd_rollback() {
   local cur prev
-  cur="$(readlink -f "$BIN")"; prev="$(find /usr/local/bin -maxdepth 1 -type f -name 'trusttunnel_client-*-linux-*' ! -path "$cur" | head -1)"; [ -n "$prev" ] || die "no previous binary available"; service_stop; ln -sfn "$(basename "$prev")" "$BIN"; service_start
+  cur="$(readlink -f "$BIN")"; prev="$(find /usr/local/bin -maxdepth 1 -type f -name 'tt-client-*-linux-*' ! -path "$cur" | head -1)"; [ -n "$prev" ] || die "no previous binary available"; service_stop; ln -sfn "$(basename "$prev")" "$BIN"; service_start
 }
 cmd_status() {
   local vps="" port="" conf="" tcp_n=0 udp_n=0 active=0
@@ -332,8 +350,8 @@ cmd_status() {
   else
     echo "  FAIL config missing"
   fi
-  systemctl is-enabled trusttunnel.service 2>/dev/null && echo "  ok    enabled" || echo "  warn  disabled"
-  if systemctl is-active trusttunnel.service 2>/dev/null; then
+  systemctl is-enabled "$SERVICE_NAME.service" 2>/dev/null && echo "  ok    enabled" || echo "  warn  disabled"
+  if systemctl is-active "$SERVICE_NAME.service" 2>/dev/null; then
     echo "  ok    active"
     active=1
   else
@@ -357,7 +375,7 @@ cmd_status() {
     echo "  info  live transport: not tested (ss/endpoint missing)"
   fi
 }
-cmd_purge() { service_stop; systemctl disable trusttunnel.service trusttunnel-guard.service >/dev/null 2>&1 || true; systemctl daemon-reload; "$POLICY" stop 2>/dev/null || true; rm -f "$INIT" "$GUARD_INIT" "$POLICY" "$CLIENT_TOML" "$DIRECT_CONF" "$RELEASE_META" "$BIN"; rm -f /usr/local/bin/trusttunnel_client-*-linux-*; rmdir "$TT_DIR" 2>/dev/null || true; systemctl daemon-reload; log "purged TT-owned local state"; }
+cmd_purge() { service_stop; systemctl disable "$SERVICE_NAME.service" "$GUARD_SERVICE_NAME.service" >/dev/null 2>&1 || true; systemctl daemon-reload; "$POLICY" stop 2>/dev/null || true; rm -f "$INIT" "$GUARD_INIT" "$POLICY" "$CLIENT_TOML" "$DIRECT_CONF" "$RELEASE_META" "$BIN"; rm -f /usr/local/bin/tt-client-*-linux-*; rmdir "$TT_DIR" 2>/dev/null || true; systemctl daemon-reload; log "purged TT-owned local state"; }
 
 cmd="${1:-help}"; shift || true
 announce_start

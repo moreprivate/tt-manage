@@ -9,9 +9,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATES_SERVER="${SCRIPT_DIR}/templates/server"
 
 # Fixed layout — no per-site knobs (robustness > flexibility).
-INSTALL_DIR="/opt/trusttunnel"
-SERVICE_USER="trusttunnel"
-SERVICE_NAME="trusttunnel"
+INSTALL_DIR="/opt/moreprivate/tt-server"
+SERVICE_USER="moreprivate"
+SERVICE_NAME="moreprivate-tt-server"
 CUSTOM_SNI=""
 HTTP_CONNECTIONS_NUM=0
 # Tolerate last-mile bufferbloat under load (library default health check is 7s).
@@ -21,7 +21,7 @@ CERT_LIVE_NAME="ocserv-ip"
 # Release source; override only for an intentional mirror.
 GITHUB_REPO="${TT_GITHUB_REPO:-moreprivate/tt-server}"
 
-BIN_NAME="trusttunnel_endpoint"
+BIN_NAME="tt-server"
 RELEASE_ASSET_PREFIX="tt-server"
 UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
 CREDS="${INSTALL_DIR}/credentials.toml"
@@ -35,7 +35,7 @@ CLIENT_PROTOCOL_FILE="${INSTALL_DIR}/client-protocol"
 ENDPOINT_IP_FILE="${INSTALL_DIR}/endpoint.ip"
 RELEASE_META="${INSTALL_DIR}/release.env"
 LE_LIVE="/etc/letsencrypt/live/${CERT_LIVE_NAME}"
-LE_HOOK="/etc/letsencrypt/renewal-hooks/deploy/trusttunnel-reload"
+LE_HOOK="/etc/letsencrypt/renewal-hooks/deploy/moreprivate-tt-server-reload"
 
 _APT_UPDATED=0
 _ST_FAILS=0
@@ -119,7 +119,7 @@ binary_resolve_link() {
   target="$(readlink "$link")"
   [[ "$target" == /* ]] || target="${INSTALL_DIR}/${target}"
   case "$target" in
-    "${INSTALL_DIR}/${BIN_NAME}-"*-linux-*) ;;
+    "${INSTALL_DIR}/${RELEASE_ASSET_PREFIX}-"*-linux-*) ;;
     *) return 1 ;;
   esac
   [[ -x "$target" ]] || return 1
@@ -160,10 +160,11 @@ binary_tx_begin() {
 }
 
 binary_tx_install() {
-  local src="$1" tag="$2" cpu target src_sum target_sum
+  local src="$1" tag="$2" target src_sum target_sum
   [[ "$tag" =~ ^[A-Za-z0-9._-]+$ ]] || die "invalid binary version: ${tag}"
-  cpu="$(machine_tag)"
-  target="${INSTALL_DIR}/${BIN_NAME}-${tag}-linux-${cpu}"
+  target="${INSTALL_DIR}/$(basename "$src")"
+  [[ "$(basename "$src")" == "${RELEASE_ASSET_PREFIX}-${tag}-linux-"* ]] \
+    || die "binary filename does not match its release tag: $(basename "$src")"
   if [[ -e "$target" ]]; then
     [[ -f "$target" && -x "$target" ]] || die "invalid versioned binary: ${target}"
     src_sum="$(sha256sum "$src" | awk '{print $1}')"
@@ -202,7 +203,7 @@ binary_tx_rollback() {
 binary_tx_commit() {
   local keep="$1" previous="${2:-}" f
   [[ "$_BIN_TX_ACTIVE" -eq 1 ]] || return 0
-  for f in "${INSTALL_DIR}/${BIN_NAME}-"*-linux-*; do
+  for f in "${INSTALL_DIR}/${RELEASE_ASSET_PREFIX}-"*-linux-*; do
     [[ -e "$f" ]] || continue
     [[ "$f" == "$keep" || "$f" == "$previous" ]] || rm -f "$f"
   done
@@ -219,7 +220,7 @@ binary_tx_on_exit() {
 
 binary_previous() {
   local current="$1" f found=""
-  for f in "${INSTALL_DIR}/${BIN_NAME}-"*-linux-*; do
+  for f in "${INSTALL_DIR}/${RELEASE_ASSET_PREFIX}-"*-linux-*; do
     [[ -f "$f" && -x "$f" && "$f" != "$current" ]] || continue
     [[ -z "$found" ]] || die "multiple rollback binaries found; run upgrade to prune them"
     found="$f"
@@ -359,13 +360,13 @@ EXAMPLES
 
     # Pin release or use a local build
     bash $0 install --custom-sni camouflage.example --version 20260725T064943Z-c6767f5d5015
-    bash $0 install --custom-sni camouflage.example --binary /root/trusttunnel_endpoint
+    bash $0 install --custom-sni camouflage.example --binary /root/tt-server-RELEASE_TAG-linux-ARCH
     bash $0 install --custom-sni camouflage.example --icmp-interface eth0
 
     # Own PEMs (no certbot)
     install -d -m 0750 ${CERT_DIR}
     # place fullchain.pem + privkey.pem, then:
-    bash $0 install --custom-sni camouflage.example --skip-certbot --binary /root/trusttunnel_endpoint
+    bash $0 install --custom-sni camouflage.example --skip-certbot --binary /root/tt-server-RELEASE_TAG-linux-ARCH
 
     # Create OpenWrt (or phone) client; password only in the file
     bash $0 add-user openwrt
@@ -374,7 +375,7 @@ EXAMPLES
     #   scp -O root@VPS:${CLIENTS_DIR}/openwrt.toml /tmp/openwrt.toml
     #   scp -O root@router:/tmp/openwrt.toml …
     # then on OpenWrt (self-contained direct; see tt-client-openwrt.sh help):
-    #   sh tt-client-openwrt.sh install --config /tmp/openwrt.toml --binary /tmp/trusttunnel_client
+    #   sh tt-client-openwrt.sh install --config /tmp/openwrt.toml --binary /tmp/tt-client-RELEASE_TAG-linux-ARCH
 
     # Rotate one client (new password; old file invalid after del+add)
     bash $0 del-user openwrt
@@ -425,6 +426,21 @@ machine_tag() {
     x86_64|amd64) echo "x86_64" ;;
     *) die "unsupported arch: $(uname -m) (GitHub endpoint releases are x86_64 only)" ;;
   esac
+}
+
+# Extract the release tag from the published server asset name. A supplied
+# binary must retain that original identity; it is never relabelled as local.
+binary_tag_from_file() {
+  local base="$(basename "$1")" tag=""
+  case "$base" in
+    "${RELEASE_ASSET_PREFIX}-"*-linux-*)
+      tag="${base#${RELEASE_ASSET_PREFIX}-}"
+      tag="${tag%-linux-*}"
+      ;;
+  esac
+  [[ -n "$tag" && "$tag" != *-linux-* ]] || \
+    die "binary filename must be a release asset (expected ${RELEASE_ASSET_PREFIX}-<tag>-linux-<arch>): ${base}"
+  printf '%s' "$tag"
 }
 
 # --- download ---
@@ -1154,8 +1170,9 @@ cmd_install() {
   if [[ -n "$local_bin" ]]; then
     [[ -f "$local_bin" ]] || die "binary file not found: $local_bin"
     log "install binary from --binary"
-    binary_tag="local-$(sha256sum "$local_bin" | awk '{print $1}')"
-    release_source=local
+    binary_tag="$(binary_tag_from_file "$local_bin")"
+    ver="$binary_tag"
+    release_source=file
   else
     [[ -n "$ver" ]] || ver="$(resolve_latest_version)"
     log "release tag: ${ver}"
@@ -1229,8 +1246,9 @@ cmd_upgrade() {
 
   if [[ -n "$local_bin" ]]; then
     [[ -f "$local_bin" ]] || die "binary file not found: $local_bin"
-    binary_tag="local-$(sha256sum "$local_bin" | awk '{print $1}')"
-    release_source=local
+    binary_tag="$(binary_tag_from_file "$local_bin")"
+    ver="$binary_tag"
+    release_source=file
   else
     need_cmds curl
     [[ -n "$ver" ]] || ver="$(resolve_latest_version)"
@@ -1243,7 +1261,7 @@ cmd_upgrade() {
 
   current="$(binary_resolve_link)" \
     || die "managed binary symlink missing or invalid — run install"
-  target="${INSTALL_DIR}/${BIN_NAME}-${binary_tag}-linux-$(machine_tag)"
+  target="${INSTALL_DIR}/$(basename "$local_bin")"
   if [[ "$current" == "$target" ]]; then
     src_sum="$(sha256sum "$local_bin" | awk '{print $1}')"
     current_sum="$(sha256sum "$current" | awk '{print $1}')"
