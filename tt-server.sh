@@ -9,9 +9,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATES_SERVER="${SCRIPT_DIR}/templates/server"
 
 # Fixed layout — no per-site knobs (robustness > flexibility).
-INSTALL_DIR="/opt/moreprivate/tt-server"
-SERVICE_USER="moreprivate"
-SERVICE_NAME="moreprivate-tt-server"
+INSTALL_DIR="/opt/trusttunnel"
+SERVICE_USER="trusttunnel"
+SERVICE_NAME="trusttunnel"
 CUSTOM_SNI=""
 HTTP_CONNECTIONS_NUM=0
 # Tolerate last-mile bufferbloat under load (library default health check is 7s).
@@ -21,7 +21,7 @@ CERT_LIVE_NAME="ocserv-ip"
 # Release source; override only for an intentional mirror.
 GITHUB_REPO="${TT_GITHUB_REPO:-moreprivate/tt-server}"
 
-BIN_NAME="tt-server"
+BIN_NAME="trusttunnel_endpoint"
 RELEASE_ASSET_PREFIX="tt-server"
 UNIT_PATH="/etc/systemd/system/${SERVICE_NAME}.service"
 CREDS="${INSTALL_DIR}/credentials.toml"
@@ -35,7 +35,7 @@ CLIENT_PROTOCOL_FILE="${INSTALL_DIR}/client-protocol"
 ENDPOINT_IP_FILE="${INSTALL_DIR}/endpoint.ip"
 RELEASE_META="${INSTALL_DIR}/release.env"
 LE_LIVE="/etc/letsencrypt/live/${CERT_LIVE_NAME}"
-LE_HOOK="/etc/letsencrypt/renewal-hooks/deploy/moreprivate-tt-server-reload"
+LE_HOOK="/etc/letsencrypt/renewal-hooks/deploy/trusttunnel-reload"
 
 _APT_UPDATED=0
 _ST_FAILS=0
