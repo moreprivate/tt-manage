@@ -1,5 +1,5 @@
 #!/bin/sh
-# tt-client-openwrt.sh — TrustTunnel OpenWrt manager (run ON the router as root, busybox ash).
+# tt-client-openwrt.sh — MorePrivate tt-client OpenWrt manager (run ON the router as root, busybox ash).
 # Sibling: tt-server.sh (VPS endpoint; add-user → clients/<name>.toml).
 # Data lifecycle and copy-paste flows: $0 help
 set -e
@@ -19,7 +19,7 @@ DIRECT_DNS_EL="${TT_DIR}/direct-dns-elements.nft"
 DIRECT_ZONE="${TT_DIR}/direct.zone"
 DIRECT_CONF="${TT_DIR}/direct.conf"
 WAN_DEV_FILE="${TT_DIR}/wan.dev"
-HOTPLUG="/etc/hotplug.d/iface/95-trusttunnel-pbr"
+HOTPLUG="/etc/hotplug.d/iface/95-moreprivate_tt_client-pbr"
 DNS_ENV="${TT_DIR}/dns.env"
 TT_DNS="${TT_DIR}/tt-dns.sh"
 RELEASE_META="${TT_DIR}/release.env"
@@ -28,7 +28,7 @@ GITHUB_REPO="${TT_GITHUB_REPO:-moreprivate/tt-client}"
 # UCI logical interface (hotplug / ifstatus)
 WAN_IF="wan"
 # UCI section name for TT-managed SQM/CAKE (do not collide with manual sqm.*)
-SQM_UCI_SECTION="trusttunnel"
+SQM_UCI_SECTION="moreprivate_tt_client"
 MARK_PRIO="20000"
 MARK="0x8802"
 TUN_TABLE="880"
@@ -91,8 +91,8 @@ has_install_artifacts() {
   [ -e "$INIT" ] && return 0
   [ -e "$GUARD_INIT" ] && return 0
   [ -e "$HOTPLUG" ] && return 0
-  [ -e /etc/sysctl.d/99-trusttunnel-ipv6.conf ] && return 0
-  for f in /etc/rc.d/*trusttunnel*; do
+  [ -e /etc/sysctl.d/99-moreprivate_tt_client-ipv6.conf ] && return 0
+  for f in /etc/rc.d/*moreprivate_tt_client*; do
     if [ -e "$f" ] || [ -L "$f" ]; then
       return 0
     fi
@@ -102,7 +102,7 @@ has_install_artifacts() {
   done
   client_running && return 0
   if command -v nft >/dev/null 2>&1 \
-    && nft list table inet trusttunnel >/dev/null 2>&1; then
+    && nft list table inet moreprivate_tt_client >/dev/null 2>&1; then
     return 0
   fi
   if command -v ip >/dev/null 2>&1 \
@@ -110,11 +110,11 @@ has_install_artifacts() {
     return 0
   fi
   if command -v uci >/dev/null 2>&1; then
-    uci -q get network.trusttunnel >/dev/null 2>&1 && return 0
-    uci -q get firewall.trusttunnel >/dev/null 2>&1 && return 0
-    uci -q get firewall.trusttunnel_icmp_reply >/dev/null 2>&1 && return 0
-    uci -q get firewall.lan_trusttunnel >/dev/null 2>&1 && return 0
-    uci -q get firewall.trusttunnel_lan_wan >/dev/null 2>&1 && return 0
+    uci -q get network.moreprivate_tt_client >/dev/null 2>&1 && return 0
+    uci -q get firewall.moreprivate_tt_client >/dev/null 2>&1 && return 0
+    uci -q get firewall.moreprivate_tt_client_icmp_reply >/dev/null 2>&1 && return 0
+    uci -q get firewall.lan_moreprivate_tt_client >/dev/null 2>&1 && return 0
+    uci -q get firewall.moreprivate_tt_client_lan_wan >/dev/null 2>&1 && return 0
   fi
   return 1
 }
@@ -145,7 +145,7 @@ _st_info() { echo "  info  $*"; }
 usage() {
   cat <<EOF
 NAME
-    tt-client-openwrt.sh ${VERSION_SCRIPT} — TrustTunnel on OpenWrt (root on this router)
+    tt-client-openwrt.sh ${VERSION_SCRIPT} — MorePrivate tt-client on OpenWrt (root on this router)
 
 SYNOPSIS
     $0 install --config FILE [OPTIONS]
@@ -182,7 +182,7 @@ DESCRIPTION
     required. Tunnel DNS server IPs may be inside or outside that list.
     DNS selection chooses only the resolver path. The returned IPv4 address is
     independently sent direct if it is in the direct list, otherwise through
-    TrustTunnel.
+    MorePrivate tt-client.
 
     If 1.1.1.1 is direct, automatic VPS-egress identity verification through
     it is skipped; test a known non-direct IP checker as instructed.
@@ -190,7 +190,7 @@ DESCRIPTION
     install/upgrade binary source (same flags on server and clients):
         --version TAG   exact ${GITHUB_REPO} release
         --binary PATH   local file instead of a release
-    install is clean-only and refuses complete or partial TrustTunnel state.
+    install is clean-only and refuses complete or partial MorePrivate tt-client state.
     Use upgrade/update-* for an installed system, or purge before reinstalling.
 
     install tries a one-shot sync using the existing NTP configuration, then
@@ -201,10 +201,10 @@ DESCRIPTION
     Custom firmware must build in kmod-tun because kernel modules require an
     exact kernel ABI; all other prerequisites are ordinary userspace packages.
 
-    With no direct-* options, all supported traffic uses TrustTunnel; only the
+    With no direct-* options, all supported traffic uses MorePrivate tt-client; only the
     router's TCP connection to the configured endpoint IP and port uses WAN.
     That endpoint exception overrides the country list: every other flow to
-    the endpoint IP, including SSH, uses TrustTunnel. dnsmasq uses the tunnel
+    the endpoint IP, including SSH, uses MorePrivate tt-client. dnsmasq uses the tunnel
     DNS servers.
 
     upgrade changes only the binary. rollback switches current and previous
@@ -212,8 +212,8 @@ DESCRIPTION
     routing policy remains fail-closed (disable leaves the kill switch on — net
     stays broken for non-direct traffic until enable). restart = stop+start,
     keep boot enablement, re-verify tunnel. direct-disable sends supported traffic
-    except the router's configured server TCP connection through TrustTunnel.
-    purge removes TrustTunnel routing and restores ordinary direct WAN.
+    except the router's configured server TCP connection through MorePrivate tt-client.
+    purge removes MorePrivate tt-client routing and restores ordinary direct WAN.
     An independent nftables kill switch starts before OpenWrt networking and
     remains active across client and firewall4 stops/reloads.
 
@@ -625,7 +625,7 @@ download_release_binary() {
   chmod 755 "${stage}/${asset}"
   actual="$("${stage}/${asset}" --version 2>/dev/null)" \
     || { rm -rf "$stage"; die "downloaded client binary is not runnable"; }
-  embedded="${actual#trusttunnel_client }"
+  embedded="${actual#tt-client }"
   echo "$embedded" | grep -qE '^[0-9]{8}T[0-9]{6}Z-[0-9a-fA-F]{12}$' \
     || { rm -rf "$stage"; die "downloaded client reported invalid embedded version '${actual}'"; }
   echo "$tag" | grep -qE '^[0-9]{8}T[0-9]{6}Z-[0-9a-fA-F]{12}$' \
@@ -947,9 +947,9 @@ add_saved_wan() {
 	case "\$wan_dev" in
 		''|*[!A-Za-z0-9_.:-]*) return 1 ;;
 	esac
-	nft get element inet trusttunnel tt_wan_devices "{ \"\$wan_dev\" }" \
+	nft get element inet moreprivate_tt_client tt_wan_devices "{ \"\$wan_dev\" }" \
 		>/dev/null 2>&1 \
-		|| nft add element inet trusttunnel tt_wan_devices "{ \"\$wan_dev\" }"
+		|| nft add element inet moreprivate_tt_client tt_wan_devices "{ \"\$wan_dev\" }"
 }
 
 add_live_default_wans() {
@@ -958,9 +958,9 @@ add_live_default_wans() {
 		case "\$wan_dev" in
 			''|*[!A-Za-z0-9_.:-]*) return 1 ;;
 		esac
-		nft get element inet trusttunnel tt_wan_devices "{ \"\$wan_dev\" }" \
+		nft get element inet moreprivate_tt_client tt_wan_devices "{ \"\$wan_dev\" }" \
 			>/dev/null 2>&1 \
-			|| nft add element inet trusttunnel tt_wan_devices "{ \"\$wan_dev\" }" \
+			|| nft add element inet moreprivate_tt_client tt_wan_devices "{ \"\$wan_dev\" }" \
 			|| return 1
 	done
 }
@@ -979,7 +979,7 @@ disable_unguarded_wans() {
 		case "\$wan_dev" in
 			''|*[!A-Za-z0-9_.:-]*) continue ;;
 		esac
-		logger -p daemon.crit -t trusttunnel-guard \
+		logger -p daemon.crit -t moreprivate-tt-client-guard \
 			"disabling unguarded WAN device \$wan_dev"
 		ip link set "\$wan_dev" down 2>/dev/null || true
 	done
@@ -994,17 +994,17 @@ populate_policy() {
 load_policy() {
 	if nft -f "\$POLICY" && populate_policy; then
 		rm -f "\$FAILED" || {
-			logger -p daemon.crit -t trusttunnel-guard \
+			logger -p daemon.crit -t moreprivate-tt-client-guard \
 				"cannot clear emergency-policy marker"
 			disable_unguarded_wans
 			return 1
 		}
 		return 0
 	fi
-	logger -p daemon.crit -t trusttunnel-guard \
+	logger -p daemon.crit -t moreprivate-tt-client-guard \
 		"full policy failed; loading endpoint-only emergency kill switch"
 	touch "\$FAILED" || {
-		logger -p daemon.crit -t trusttunnel-guard \
+		logger -p daemon.crit -t moreprivate-tt-client-guard \
 			"cannot record emergency-policy state; disabling WAN devices"
 		disable_unguarded_wans
 		return 1
@@ -1012,7 +1012,7 @@ load_policy() {
 	if nft -f "\$FAILSAFE" && populate_policy; then
 		return 0
 	fi
-	logger -p daemon.crit -t trusttunnel-guard \
+	logger -p daemon.crit -t moreprivate-tt-client-guard \
 		"emergency kill switch incomplete; disabling WAN devices"
 	disable_unguarded_wans
 	return 1
@@ -1020,26 +1020,26 @@ load_policy() {
 
 check() {
 	[ ! -e "\$FAILED" ] || return 1
-	nft list set inet trusttunnel tt_wan_devices >/dev/null 2>&1 || return 1
-	nft get element inet trusttunnel tt_policy_mode "{ 0x1 }" \
+	nft list set inet moreprivate_tt_client tt_wan_devices >/dev/null 2>&1 || return 1
+	nft get element inet moreprivate_tt_client tt_policy_mode "{ 0x1 }" \
 		>/dev/null 2>&1 || return 1
-	nft list set inet trusttunnel tt_direct4 >/dev/null 2>&1 || return 1
-	nft list set inet trusttunnel tt_direct_dns4 >/dev/null 2>&1 || return 1
-	nft list chain inet trusttunnel trusttunnel_output_mark >/dev/null 2>&1 \
+	nft list set inet moreprivate_tt_client tt_direct4 >/dev/null 2>&1 || return 1
+	nft list set inet moreprivate_tt_client tt_direct_dns4 >/dev/null 2>&1 || return 1
+	nft list chain inet moreprivate_tt_client moreprivate_tt_client_output_mark >/dev/null 2>&1 \
 		|| return 1
-	nft list chain inet trusttunnel trusttunnel_output_guard 2>/dev/null \
+	nft list chain inet moreprivate_tt_client moreprivate_tt_client_output_guard 2>/dev/null \
 		| grep -q reject || return 1
-	nft list chain inet trusttunnel trusttunnel_forward_guard 2>/dev/null \
+	nft list chain inet moreprivate_tt_client moreprivate_tt_client_forward_guard 2>/dev/null \
 		| grep -q reject || return 1
 	wan_dev="\$(cat "\$WAN_DEV_FILE" 2>/dev/null)"
 	case "\$wan_dev" in
 		''|*[!A-Za-z0-9_.:-]*) return 1 ;;
 	esac
-	nft get element inet trusttunnel tt_wan_devices "{ \"\$wan_dev\" }" \
+	nft get element inet moreprivate_tt_client tt_wan_devices "{ \"\$wan_dev\" }" \
 		>/dev/null 2>&1 || return 1
 	for wan_dev in \$(ip -4 route show default 2>/dev/null \
 		| sed -n 's/.* dev \([^ ]*\).*/\1/p'); do
-		nft get element inet trusttunnel tt_wan_devices "{ \"\$wan_dev\" }" \
+		nft get element inet moreprivate_tt_client tt_wan_devices "{ \"\$wan_dev\" }" \
 			>/dev/null 2>&1 || return 1
 	done
 	ip rule show | grep -q "\$MARK_PRIO:.*\$MARK" || return 1
@@ -1047,7 +1047,7 @@ check() {
 
 start() {
 	load_policy || {
-		logger -p daemon.crit -t trusttunnel-guard \
+		logger -p daemon.crit -t moreprivate-tt-client-guard \
 			"policy startup failed"
 		return 1
 	}
@@ -1078,7 +1078,7 @@ write_hotplug() {
 [ "\$ACTION" = ifup ] || [ "\$ACTION" = ifupdate ] || exit 0
 is_wan=0
 event_dev="\${DEVICE:-}"
-if [ "\$INTERFACE" = trusttunnel ]; then
+if [ "\$INTERFACE" = moreprivate_tt_client ]; then
   :
 else
   [ -n "\$event_dev" ] || event_dev="\$(
@@ -1092,10 +1092,10 @@ else
     exit 0
   fi
 fi
-if ! nft list chain inet trusttunnel trusttunnel_output_guard >/dev/null 2>&1 \
-  || ! nft list chain inet trusttunnel trusttunnel_forward_guard >/dev/null 2>&1; then
+if ! nft list chain inet moreprivate_tt_client moreprivate_tt_client_output_guard >/dev/null 2>&1 \
+  || ! nft list chain inet moreprivate_tt_client moreprivate_tt_client_forward_guard >/dev/null 2>&1; then
   /etc/init.d/tt-client-guard start || {
-    logger -p daemon.crit -t trusttunnel-guard \
+    logger -p daemon.crit -t moreprivate-tt-client-guard \
       "policy unavailable on \${INTERFACE}; disabling \${event_dev:-${wan_dev}}"
     ip link set "\${event_dev:-${wan_dev}}" down 2>/dev/null || true
     exit 1
@@ -1104,26 +1104,26 @@ fi
 if [ "\$is_wan" = "1" ]; then
   case "\$event_dev" in
     *[!A-Za-z0-9_.:-]*)
-      logger -p daemon.crit -t trusttunnel-guard "invalid WAN device name"
+      logger -p daemon.crit -t moreprivate-tt-client-guard "invalid WAN device name"
       exit 1
       ;;
   esac
-  nft get element inet trusttunnel tt_wan_devices "{ \"\$event_dev\" }" \
+  nft get element inet moreprivate_tt_client tt_wan_devices "{ \"\$event_dev\" }" \
     >/dev/null 2>&1 \
-    || nft add element inet trusttunnel tt_wan_devices "{ \"\$event_dev\" }" || {
-      logger -p daemon.crit -t trusttunnel-guard "cannot guard WAN device \$event_dev"
+    || nft add element inet moreprivate_tt_client tt_wan_devices "{ \"\$event_dev\" }" || {
+      logger -p daemon.crit -t moreprivate-tt-client-guard "cannot guard WAN device \$event_dev"
       ip link set "\$event_dev" down 2>/dev/null || true
       exit 1
     }
 fi
 while ip rule del priority ${MARK_PRIO} 2>/dev/null; do :; done
 ip rule add priority ${MARK_PRIO} fwmark ${MARK}/0xffffffff lookup main || {
-  logger -p daemon.crit -t trusttunnel-guard "cannot install endpoint/direct mark rule"
+  logger -p daemon.crit -t moreprivate-tt-client-guard "cannot install endpoint/direct mark rule"
   exit 1
 }
 if ip link show tun0 >/dev/null 2>&1; then
   ip route replace table ${TUN_TABLE} ${vps_ip}/32 dev tun0 || {
-    logger -p daemon.crit -t trusttunnel-guard "cannot install VPS tunnel route"
+    logger -p daemon.crit -t moreprivate-tt-client-guard "cannot install VPS tunnel route"
     exit 1
   }
 fi
@@ -1173,11 +1173,11 @@ direct_dns_to_elements() {
 replace_live_direct_dns_set() {
   local values ip
   values="$(normalize_list "$1")"
-  nft list set inet trusttunnel tt_direct_dns4 >/dev/null 2>&1 || return 1
-  nft flush set inet trusttunnel tt_direct_dns4 || return 1
+  nft list set inet moreprivate_tt_client tt_direct_dns4 >/dev/null 2>&1 || return 1
+  nft flush set inet moreprivate_tt_client tt_direct_dns4 || return 1
   for ip in $values; do
     is_ipv4 "$ip" || return 1
-    nft add element inet trusttunnel tt_direct_dns4 "{ $ip }" || return 1
+    nft add element inet moreprivate_tt_client tt_direct_dns4 "{ $ip }" || return 1
   done
 }
 
@@ -1191,7 +1191,7 @@ write_pbr_nft() {
   [ -f "$DIRECT_EL" ] || write_empty_set_elements "$DIRECT_EL" || return 1
   [ -f "$DIRECT_DNS_EL" ] || write_empty_set_elements "$DIRECT_DNS_EL" || return 1
   cat >"$tmp" <<EOF
-# TrustTunnel PBR — managed by tt-client-openwrt.sh
+# MorePrivate tt-client PBR — managed by tt-client-openwrt.sh
 # Independent from firewall4: loaded by ${GUARD_INIT} before network startup.
 # Router endpoint TCP/UDP + direct-country traffic + selected WAN DNS → WAN.
 # VPS precedence: only router TCP/UDP to the endpoint port is direct; every other
@@ -1200,8 +1200,8 @@ write_pbr_nft() {
 # endpoint_port=${endpoint_port}
 # wan_dev=${wan_dev}
 
-destroy table inet trusttunnel
-table inet trusttunnel {
+destroy table inet moreprivate_tt_client
+table inet moreprivate_tt_client {
 set tt_wan_devices {
     type ifname
     elements = { "${wan_dev}" }
@@ -1223,13 +1223,13 @@ set tt_direct_dns4 {
     include "${DIRECT_DNS_EL}"
 }
 
-chain trusttunnel_prerouting {
+chain moreprivate_tt_client_prerouting {
     type filter hook prerouting priority mangle; policy accept;
     ip daddr ${vps_ip} return
     meta l4proto { tcp, udp, icmp } ip daddr @tt_direct4 meta mark set ${MARK}
 }
 
-chain trusttunnel_output_mark {
+chain moreprivate_tt_client_output_mark {
     type route hook output priority mangle; policy accept;
     ip protocol tcp ip daddr ${vps_ip} tcp dport ${endpoint_port} meta mark set ${MARK}
     ip protocol udp ip daddr ${vps_ip} udp dport ${endpoint_port} meta mark set ${MARK}
@@ -1239,14 +1239,14 @@ chain trusttunnel_output_mark {
     meta l4proto { tcp, udp, icmp } ip daddr @tt_direct4 meta mark set ${MARK}
 }
 
-chain trusttunnel_forward_guard {
+chain moreprivate_tt_client_forward_guard {
     type filter hook forward priority filter - 1; policy accept;
     oifname @tt_wan_devices ip daddr ${vps_ip} counter reject
     oifname @tt_wan_devices meta l4proto { tcp, udp, icmp } ip daddr @tt_direct4 accept
     oifname @tt_wan_devices counter reject
 }
 
-chain trusttunnel_output_guard {
+chain moreprivate_tt_client_output_guard {
     type filter hook output priority filter - 1; policy accept;
     oifname @tt_wan_devices ip protocol tcp ip daddr ${vps_ip} tcp dport ${endpoint_port} accept
     oifname @tt_wan_devices ip protocol udp ip daddr ${vps_ip} udp dport ${endpoint_port} accept
@@ -1276,8 +1276,8 @@ write_failsafe_nft() {
   [ -n "$wan_dev" ] || return 1
   cat >"$tmp" <<EOF
 # Endpoint-only emergency kill switch — managed by tt-client-openwrt.sh
-destroy table inet trusttunnel
-table inet trusttunnel {
+destroy table inet moreprivate_tt_client
+table inet moreprivate_tt_client {
 set tt_wan_devices {
     type ifname
     elements = { "${wan_dev}" }
@@ -1297,22 +1297,22 @@ set tt_direct_dns4 {
     type ipv4_addr
 }
 
-chain trusttunnel_prerouting {
+chain moreprivate_tt_client_prerouting {
     type filter hook prerouting priority mangle; policy accept;
 }
 
-chain trusttunnel_output_mark {
+chain moreprivate_tt_client_output_mark {
     type route hook output priority mangle; policy accept;
     ip protocol tcp ip daddr ${vps_ip} tcp dport ${endpoint_port} meta mark set ${MARK}
     ip protocol udp ip daddr ${vps_ip} udp dport ${endpoint_port} meta mark set ${MARK}
 }
 
-chain trusttunnel_forward_guard {
+chain moreprivate_tt_client_forward_guard {
     type filter hook forward priority filter - 1; policy accept;
     oifname @tt_wan_devices counter reject
 }
 
-chain trusttunnel_output_guard {
+chain moreprivate_tt_client_output_guard {
     type filter hook output priority filter - 1; policy accept;
     oifname @tt_wan_devices ip protocol tcp ip daddr ${vps_ip} tcp dport ${endpoint_port} accept
     oifname @tt_wan_devices ip protocol udp ip daddr ${vps_ip} udp dport ${endpoint_port} accept
@@ -1348,7 +1348,7 @@ remove_vps_tunnel_route() {
 }
 
 reload_fw() {
-  # Never reload network while TrustTunnel is running: netifd removes the
+  # Never reload network while MorePrivate tt-client is running: netifd removes the
   # client-owned tun routes. Network UCI is reloaded once before client start.
   # Soft-fail so callers in transaction paths can roll back (do not die here).
   /etc/init.d/firewall restart || return 1
@@ -1356,11 +1356,11 @@ reload_fw() {
 
 firewall_lan_tunnel_jump_ready() {
   nft list chain inet fw4 forward_lan 2>/dev/null \
-    | grep -q 'jump accept_to_trusttunnel'
+    | grep -q 'jump accept_to_moreprivate_tt_client'
 }
 
 firewall_tunnel_accept_ready() {
-  nft list chain inet fw4 accept_to_trusttunnel 2>/dev/null \
+  nft list chain inet fw4 accept_to_moreprivate_tt_client 2>/dev/null \
     | grep -q 'oifname "tun0".*accept'
 }
 
@@ -1402,35 +1402,35 @@ install_zones() {
   bak /etc/config/network
   bak /etc/config/firewall
 
-  uci set network.trusttunnel='interface' || return 1
-  uci set network.trusttunnel.proto='none' || return 1
-  uci set network.trusttunnel.device='tun0' || return 1
+  uci set network.moreprivate_tt_client='interface' || return 1
+  uci set network.moreprivate_tt_client.proto='none' || return 1
+  uci set network.moreprivate_tt_client.device='tun0' || return 1
   uci commit network || return 1
 
-  uci set firewall.trusttunnel='zone' || return 1
-  uci set firewall.trusttunnel.name='trusttunnel' || return 1
-  uci add_list firewall.trusttunnel.network='trusttunnel' || return 1
-  uci set firewall.trusttunnel.input='REJECT' || return 1
-  uci set firewall.trusttunnel.output='ACCEPT' || return 1
-  uci set firewall.trusttunnel.forward='REJECT' || return 1
-  uci set firewall.trusttunnel.mtu_fix='1' || return 1
+  uci set firewall.moreprivate_tt_client='zone' || return 1
+  uci set firewall.moreprivate_tt_client.name='moreprivate_tt_client' || return 1
+  uci add_list firewall.moreprivate_tt_client.network='moreprivate_tt_client' || return 1
+  uci set firewall.moreprivate_tt_client.input='REJECT' || return 1
+  uci set firewall.moreprivate_tt_client.output='ACCEPT' || return 1
+  uci set firewall.moreprivate_tt_client.forward='REJECT' || return 1
+  uci set firewall.moreprivate_tt_client.mtu_fix='1' || return 1
 
   # The tunnel zone remains closed to unsolicited router input.  Permit only
   # echo replies needed by router-originated ICMP requests sent through TT.
   # This is explicit because not every firewall/kernel combination classifies
   # the userspace-synthesized reply as conntrack ESTABLISHED.
-  uci -q delete firewall.trusttunnel_icmp_reply 2>/dev/null || true
-  uci set firewall.trusttunnel_icmp_reply='rule' || return 1
-  uci set firewall.trusttunnel_icmp_reply.name='Allow-TrustTunnel-ICMP-echo-reply' || return 1
-  uci set firewall.trusttunnel_icmp_reply.src='trusttunnel' || return 1
-  uci set firewall.trusttunnel_icmp_reply.family='ipv4' || return 1
-  uci set firewall.trusttunnel_icmp_reply.proto='icmp' || return 1
-  uci add_list firewall.trusttunnel_icmp_reply.icmp_type='echo-reply' || return 1
-  uci set firewall.trusttunnel_icmp_reply.target='ACCEPT' || return 1
+  uci -q delete firewall.moreprivate_tt_client_icmp_reply 2>/dev/null || true
+  uci set firewall.moreprivate_tt_client_icmp_reply='rule' || return 1
+  uci set firewall.moreprivate_tt_client_icmp_reply.name='Allow-MorePrivate tt-client-ICMP-echo-reply' || return 1
+  uci set firewall.moreprivate_tt_client_icmp_reply.src='moreprivate_tt_client' || return 1
+  uci set firewall.moreprivate_tt_client_icmp_reply.family='ipv4' || return 1
+  uci set firewall.moreprivate_tt_client_icmp_reply.proto='icmp' || return 1
+  uci add_list firewall.moreprivate_tt_client_icmp_reply.icmp_type='echo-reply' || return 1
+  uci set firewall.moreprivate_tt_client_icmp_reply.target='ACCEPT' || return 1
 
-  uci set firewall.lan_trusttunnel='forwarding' || return 1
-  uci set firewall.lan_trusttunnel.src='lan' || return 1
-  uci set firewall.lan_trusttunnel.dest='trusttunnel' || return 1
+  uci set firewall.lan_moreprivate_tt_client='forwarding' || return 1
+  uci set firewall.lan_moreprivate_tt_client.src='lan' || return 1
+  uci set firewall.lan_moreprivate_tt_client.dest='moreprivate_tt_client' || return 1
 
   # Preserve every shared forwarding. The independent nft guard constrains any
   # existing path to WAN, so only create an owned LAN→WAN path when none exists.
@@ -1441,9 +1441,9 @@ install_zones() {
     break
   done
   if [ "$has_lan_wan" = 0 ]; then
-    uci set firewall.trusttunnel_lan_wan='forwarding' || return 1
-    uci set firewall.trusttunnel_lan_wan.src='lan' || return 1
-    uci set firewall.trusttunnel_lan_wan.dest='wan' || return 1
+    uci set firewall.moreprivate_tt_client_lan_wan='forwarding' || return 1
+    uci set firewall.moreprivate_tt_client_lan_wan.src='lan' || return 1
+    uci set firewall.moreprivate_tt_client_lan_wan.dest='wan' || return 1
   fi
   uci commit firewall || return 1
 }
@@ -1452,11 +1452,11 @@ disable_ipv6() {
   bak /etc/config/network
   bak /etc/config/dhcp
   mkdir -p /etc/sysctl.d
-  cat >/etc/sysctl.d/99-trusttunnel-ipv6.conf <<'EOF'
+  cat >/etc/sysctl.d/99-moreprivate_tt_client-ipv6.conf <<'EOF'
 net.ipv6.conf.all.disable_ipv6=1
 net.ipv6.conf.default.disable_ipv6=1
 EOF
-  sysctl -p /etc/sysctl.d/99-trusttunnel-ipv6.conf 2>/dev/null || true
+  sysctl -p /etc/sysctl.d/99-moreprivate_tt_client-ipv6.conf 2>/dev/null || true
   uci -q get network.wan6 >/dev/null 2>&1 && uci set network.wan6.disabled='1'
   for s in $(uci -q show network 2>/dev/null | sed -n "s/^\(network\.[^=]*\)=interface$/\1/p"); do
     [ "$(uci -q get "$s.proto" 2>/dev/null)" = "dhcpv6" ] && uci set "$s.disabled"='1'
@@ -1568,7 +1568,7 @@ install_dns() {
 # (ubus NOT_FOUND). Harmless if the process actually exits — do not scare users.
 PROCD_UBUS_NOT_FOUND_MSG='Command failed: Not found'
 
-# Run /etc/init.d/trusttunnel <cmd>; drop known procd/ubus noise; keep real errors.
+# Run /etc/init.d/moreprivate_tt_client <cmd>; drop known procd/ubus noise; keep real errors.
 # stdout/stderr of the init script are filtered; return code is preserved.
 service_init_cmd() {
   local cmd="$1" out rc=0
@@ -1587,7 +1587,7 @@ service_init_cmd() {
 }
 
 # Stop procd service and ensure no stray process remains (same end state as a
-# successful /etc/init.d/trusttunnel stop). Success = process gone, not init rc.
+# successful /etc/init.d/moreprivate_tt_client stop). Success = process gone, not init rc.
 service_stop() {
   local i=0
   if [ ! -x "$INIT" ]; then
@@ -1621,7 +1621,7 @@ service_stop() {
     sleep 1
   fi
   if client_running; then
-    echo "error: trusttunnel_client did not stop" >&2
+    echo "error: tt-client did not stop" >&2
     return 1
   fi
   return 0
@@ -1647,7 +1647,7 @@ service_start() {
     sleep 1
   done
   client_running || {
-    echo "error: trusttunnel_client did not start" >&2
+    echo "error: tt-client did not start" >&2
     return 1
   }
   return 0
@@ -1677,7 +1677,7 @@ service_restart_preserve_enablement() {
     sleep 1
   done
   if ! client_running; then
-    echo "error: trusttunnel_client did not start after restart" >&2
+    echo "error: tt-client did not start after restart" >&2
     return 1
   fi
   return 0
@@ -2182,7 +2182,7 @@ cmd_tun_shape() {
   is_positive_kbit "$up" || die "tun-shape: --upload KBIT required (positive integer kbit/s)"
   is_tunnel_shape_iface "$iface" || die "tun-shape: refuse non-tunnel iface: ${iface}"
   ip link show dev "$iface" >/dev/null 2>&1 \
-    || die "tun-shape: ${iface} not present (start TrustTunnel first)"
+    || die "tun-shape: ${iface} not present (start MorePrivate tt-client first)"
   apply_wan_shape_uci "$iface" "$down" "$up"
   log "OK tun-shape sqm.${SQM_UCI_SECTION} on ${iface} (${down}/${up} kbit)"
   log "tip: only if bufferbloat is proven; rates ≈ 85–95% of measured tunnel bulk — not ISP WAN rate"
@@ -2266,7 +2266,7 @@ client_single_pid() {
 client_latest_vpn_state() {
   local pid="$1"
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-  tt_log_tail 400 | awk -v tag="trusttunnel_client[${pid}]:" '
+  tt_log_tail 400 | awk -v tag="tt-client[${pid}]:" '
     index($0, tag) && /VPN_SS_/ {
       line = $0
       sub(/^.*VPN_SS_/, "VPN_SS_", line)
@@ -2388,7 +2388,7 @@ need_pkgs() {
   log "missing OpenWrt packages: ${miss}"
   log "apk update"
   apk update \
-    || die "apk update failed; installation stopped before TrustTunnel changes"
+    || die "apk update failed; installation stopped before MorePrivate tt-client changes"
   log "apk add ${miss}"
   if apk add $miss >"$apk_log" 2>&1; then
     cat "$apk_log"
@@ -2413,13 +2413,13 @@ need_pkgs() {
 }
 
 # --- verify ---
-# Recent log lines mentioning trusttunnel / VPN (logread -e optional on old builds)
+# Recent log lines mentioning moreprivate_tt_client / VPN (logread -e optional on old builds)
 tt_log_tail() {
   local n="${1:-60}"
   # shellcheck disable=SC2015
   {
-    logread -e trusttunnel 2>/dev/null \
-      || logread 2>/dev/null | grep -i trusttunnel
+    logread -e moreprivate_tt_client 2>/dev/null \
+      || logread 2>/dev/null | grep -i moreprivate_tt_client
   } | tail -n "$n" 2>/dev/null || true
 }
 
@@ -2455,7 +2455,7 @@ verify_tunnel() {
 tunnel_probe_ip() {
   local ip
   for ip in 1.1.1.1 8.8.8.8 9.9.9.9; do
-    if ! nft get element inet trusttunnel tt_direct4 "{ $ip }" >/dev/null 2>&1; then
+    if ! nft get element inet moreprivate_tt_client tt_direct4 "{ $ip }" >/dev/null 2>&1; then
       echo "$ip"
       return 0
     fi
@@ -2469,21 +2469,21 @@ guard_policy_ready() {
   [ -x "$GUARD_INIT" ] || return 1
   "$GUARD_INIT" check >/dev/null 2>&1 || return 1
   [ ! -e "${TT_DIR}/policy.failed" ] || return 1
-  nft list table inet trusttunnel >/dev/null 2>&1 || return 1
-  nft list set inet trusttunnel tt_direct4 >/dev/null 2>&1 || return 1
-  nft list set inet trusttunnel tt_direct_dns4 >/dev/null 2>&1 || return 1
-  nft get element inet trusttunnel tt_wan_devices "{ \"${wan_dev}\" }" \
+  nft list table inet moreprivate_tt_client >/dev/null 2>&1 || return 1
+  nft list set inet moreprivate_tt_client tt_direct4 >/dev/null 2>&1 || return 1
+  nft list set inet moreprivate_tt_client tt_direct_dns4 >/dev/null 2>&1 || return 1
+  nft get element inet moreprivate_tt_client tt_wan_devices "{ \"${wan_dev}\" }" \
     >/dev/null 2>&1 || return 1
   for dev in $(ip -4 route show default 2>/dev/null \
     | sed -n 's/.* dev \([^ ]*\).*/\1/p'); do
-    nft get element inet trusttunnel tt_wan_devices "{ \"${dev}\" }" \
+    nft get element inet moreprivate_tt_client tt_wan_devices "{ \"${dev}\" }" \
       >/dev/null 2>&1 || return 1
   done
-  nft list chain inet trusttunnel trusttunnel_output_mark \
+  nft list chain inet moreprivate_tt_client moreprivate_tt_client_output_mark \
     >/dev/null 2>&1 || return 1
-  nft list chain inet trusttunnel trusttunnel_output_guard 2>/dev/null \
+  nft list chain inet moreprivate_tt_client moreprivate_tt_client_output_guard 2>/dev/null \
     | grep -q reject || return 1
-  nft list chain inet trusttunnel trusttunnel_forward_guard 2>/dev/null \
+  nft list chain inet moreprivate_tt_client moreprivate_tt_client_forward_guard 2>/dev/null \
     | grep -q reject || return 1
 }
 
@@ -2506,9 +2506,9 @@ verify_pbr() {
     ip route get "$vps_ip" 2>/dev/null | grep -qE "dev tun0|table ${TUN_TABLE}" \
       || die "VPS non-endpoint traffic not via tun0: $(ip route get "$vps_ip" 2>/dev/null)"
   fi
-  nft list set inet trusttunnel tt_direct4 >/dev/null 2>&1 \
+  nft list set inet moreprivate_tt_client tt_direct4 >/dev/null 2>&1 \
     || die "tt_direct4 nft set missing (kill switch load failed?)"
-  nft list set inet trusttunnel tt_direct_dns4 >/dev/null 2>&1 \
+  nft list set inet moreprivate_tt_client tt_direct_dns4 >/dev/null 2>&1 \
     || die "tt_direct_dns4 nft set missing (kill switch load failed?)"
   for s in $(uci show firewall 2>/dev/null | sed -n 's/^\(firewall\.[^=]*\)=forwarding$/\1/p'); do
     [ "$(uci -q get "$s.src" 2>/dev/null)" = "lan" ] || continue
@@ -2526,7 +2526,7 @@ verify_pbr() {
   nft list chain inet fw4 srcnat_wan 2>/dev/null | grep -q masquerade \
     || die "active WAN masquerade rule missing"
   firewall_lan_tunnel_ready \
-    || die "active firewall4 LAN → trusttunnel forwarding missing"
+    || die "active firewall4 LAN → moreprivate_tt_client forwarding missing"
 }
 
 cloudflare_trace() {
@@ -2553,7 +2553,7 @@ cloudflare_trace_ip() {
 
 verify_exit_ip() {
   local vps_ip="$1" direct_ip dns_ip hard_verified=0
-  if nft get element inet trusttunnel tt_direct4 '{ 1.1.1.1 }' >/dev/null 2>&1; then
+  if nft get element inet moreprivate_tt_client tt_direct4 '{ 1.1.1.1 }' >/dev/null 2>&1; then
     echo "WARNING: 1.1.1.1 is in the direct IP list; automatic VPS-egress verification via 1.1.1.1 is skipped"
     echo "WARNING: test the public IP yourself with a known non-direct IP checker; expected ${vps_ip}"
   else
@@ -2626,7 +2626,7 @@ verify_icmp() {
     return 0
   }
   ip route get "$probe" 2>/dev/null | grep -qE 'tun0|table 880' || {
-    echo "FAIL: ICMP test target ${probe} is not routed through TrustTunnel"
+    echo "FAIL: ICMP test target ${probe} is not routed through MorePrivate tt-client"
     return 1
   }
   before="$(ip -s link show dev tun0 2>/dev/null \
@@ -2651,17 +2651,17 @@ verify_icmp() {
   printf '%s\n' "$ping_output" | tail -n 6 | sed 's/^/  router ping: /'
   echo "  route: $(ip route get "$probe" 2>/dev/null | head -1)"
   echo "  tun0 packet delta during ping: RX=$((rx_after - rx_before)) TX=$((tx_after - tx_before))"
-  if [ "$(uci -q get firewall.trusttunnel_icmp_reply.src 2>/dev/null)" != "trusttunnel" ] \
-    || [ "$(uci -q get firewall.trusttunnel_icmp_reply.target 2>/dev/null)" != "ACCEPT" ]; then
+  if [ "$(uci -q get firewall.moreprivate_tt_client_icmp_reply.src 2>/dev/null)" != "moreprivate_tt_client" ] \
+    || [ "$(uci -q get firewall.moreprivate_tt_client_icmp_reply.target 2>/dev/null)" != "ACCEPT" ]; then
     echo "  router firewall: managed tunnel echo-reply exception is missing"
-  elif ! nft list chain inet fw4 input_trusttunnel 2>/dev/null \
+  elif ! nft list chain inet fw4 input_moreprivate_tt_client 2>/dev/null \
     | grep -qE 'echo-reply.*accept|icmp type echo-reply.*accept'; then
     echo "  router firewall: managed echo-reply exception is not active in firewall4"
   fi
   tt_log_tail 40 | grep -iE 'icmp|drop|error' | tail -n 10 \
     | sed 's/^/  client log: /' || true
   echo "  VPS: vpn.toml needs [icmp] with the real egress interface"
-  echo "  VPS: systemd service needs CAP_NET_RAW, then restart trusttunnel"
+  echo "  VPS: systemd service needs CAP_NET_RAW, then restart moreprivate_tt_client"
   return 1
 }
 
@@ -2732,7 +2732,7 @@ cmd_install() {
   need_file "$config"
   [ -z "$binary" ] || need_file "$binary"
   if has_install_artifacts; then
-    die "install requires a clean router with no TrustTunnel state; use upgrade/update-* for an installed system, or run purge first"
+    die "install requires a clean router with no MorePrivate tt-client state; use upgrade/update-* for an installed system, or run purge first"
   fi
   try_clock_sync
   # An installed kmod may simply not have been loaded yet. Avoid a false
@@ -2812,7 +2812,7 @@ cmd_install() {
     rm -f "$DIRECT_ZONE"
     write_empty_set_elements "$DIRECT_EL"
     write_empty_set_elements "$DIRECT_DNS_EL"
-    log "no direct IP list; supported traffic uses TrustTunnel"
+    log "no direct IP list; supported traffic uses MorePrivate tt-client"
   fi
   log "ipv6 off"
   disable_ipv6
@@ -2837,16 +2837,16 @@ cmd_install() {
 
   log "procd"
   if ! write_init; then
-    rollback_failed_install "failed to install TrustTunnel service"
+    rollback_failed_install "failed to install MorePrivate tt-client service"
   fi
   service_start \
-    || rollback_failed_install "TrustTunnel service failed to start"
+    || rollback_failed_install "MorePrivate tt-client service failed to start"
 
   log "verify tunnel"
   verify_tunnel \
-    || rollback_failed_install "TrustTunnel failed to connect"
+    || rollback_failed_install "MorePrivate tt-client failed to connect"
 
-  # apply_pbr restarted firewall before the TrustTunnel zone existed.  Reload
+  # apply_pbr restarted firewall before the MorePrivate tt-client zone existed.  Reload
   # once now, after tun0 exists, so firewall4 can bind the zone to the actual
   # device.  Never infer active forwarding merely from committed UCI.
   log "firewall LAN → tunnel"
@@ -2854,7 +2854,7 @@ cmd_install() {
     rollback_failed_install "firewall reload failed after tunnel startup"
   fi
   if ! firewall_lan_tunnel_ready; then
-    rollback_failed_install "firewall4 did not activate LAN → trusttunnel forwarding"
+    rollback_failed_install "firewall4 did not activate LAN → moreprivate_tt_client forwarding"
   fi
 
   log "DNS"
@@ -2867,7 +2867,7 @@ cmd_install() {
     rollback_failed_install "PBR verification failed"
   fi
   verify_tunnel \
-    || rollback_failed_install "TrustTunnel stopped after enabling DNS"
+    || rollback_failed_install "MorePrivate tt-client stopped after enabling DNS"
   verify_exit_ip "$vps_ip" \
     || rollback_failed_install "tunnel egress verification failed"
   verify_icmp \
@@ -3170,7 +3170,7 @@ cmd_update_direct() {
   if [ "$DIRECT_ENABLED" = "1" ]; then
     log "direct routing enabled — applying IP PBR + DNS"
     if ! (apply_direct_stack \
-      && nft list set inet trusttunnel tt_direct4 >/dev/null 2>&1 \
+      && nft list set inet moreprivate_tt_client tt_direct4 >/dev/null 2>&1 \
       && save_direct_conf); then
       if [ "$did_zone" = "1" ]; then
         if [ "$had_previous" = "1" ]; then
@@ -3247,7 +3247,7 @@ cmd_direct_enable() {
   fi
   DIRECT_ENABLED=1
   if ! (apply_direct_stack \
-    && nft list set inet trusttunnel tt_direct4 >/dev/null 2>&1 \
+    && nft list set inet moreprivate_tt_client tt_direct4 >/dev/null 2>&1 \
     && save_direct_conf); then
     if [ "$did_candidate" = "1" ]; then
       if [ "$had_previous" = "1" ]; then
@@ -3283,7 +3283,7 @@ cmd_direct_disable() {
   DIRECT_ENABLED=0
   # Keep DIRECT_ZONE on disk for re-enable; empty nft set + DNS all via VPS path
   if ! (apply_direct_stack \
-    && nft list set inet trusttunnel tt_direct4 >/dev/null 2>&1 \
+    && nft list set inet moreprivate_tt_client tt_direct4 >/dev/null 2>&1 \
     && save_direct_conf); then
     load_direct_conf
     if ! (apply_direct_stack); then
@@ -3306,8 +3306,8 @@ cmd_direct_disable() {
 
 cmd_disable() {
   [ -x "$INIT" ] || die "not installed"
-  log "disable TrustTunnel service (direct routing policy stays)"
-  service_stop || die "trusttunnel stop failed; service remains enabled"
+  log "disable MorePrivate tt-client service (direct routing policy stays)"
+  service_stop || die "moreprivate_tt_client stop failed; service remains enabled"
   "$INIT" disable 2>/dev/null || true
   echo "OK disable"
   echo "  TT stopped; direct exceptions + fail-closed WAN rules still active"
@@ -3320,8 +3320,8 @@ cmd_enable() {
   vps_ip="$(parse_vps_ip "$CLIENT_TOML")" \
     || die "cannot parse VPS IP from client.toml"
   wan_dev="$(get_wan_dev)"
-  log "enable TrustTunnel service"
-  service_start || die "trusttunnel start failed"
+  log "enable MorePrivate tt-client service"
+  service_start || die "moreprivate_tt_client start failed"
   verify_tunnel || exit 1
   verify_pbr "$vps_ip" "$wan_dev" || exit 1
   verify_icmp || exit 1
@@ -3329,15 +3329,15 @@ cmd_enable() {
 }
 
 # Stop+start client; keep boot enablement; do not touch PBR/kill-switch.
-# Must be as reliable as `/etc/init.d/trusttunnel restart` (hard stop + settle + verify).
+# Must be as reliable as `/etc/init.d/moreprivate_tt_client restart` (hard stop + settle + verify).
 cmd_restart() {
   local vps_ip wan_dev i=0
   need_installed
   vps_ip="$(parse_vps_ip "$CLIENT_TOML")" \
     || die "cannot parse VPS IP from client.toml"
   wan_dev="$(get_wan_dev)"
-  log "restart TrustTunnel service (PBR/kill-switch unchanged)"
-  service_restart_preserve_enablement || die "trusttunnel restart failed"
+  log "restart MorePrivate tt-client service (PBR/kill-switch unchanged)"
+  service_restart_preserve_enablement || die "moreprivate_tt_client restart failed"
   log "wait for tunnel to settle (process + tun0 + H3)"
   service_wait_tunnel_ready 30 || log "warn: settle timeout — still verifying"
   # Same budget as upgrade: H3 + ICMP mux often need >8s after a long-lived wedge.
@@ -3351,7 +3351,7 @@ cmd_restart() {
     fi
     [ "$i" -lt 6 ] && log "verify attempt ${i}/6 not ready yet..."
   done
-  die "restart completed but live verification failed (tunnel/PBR/ICMP) — check logread -e trusttunnel and VPS [icmp]"
+  die "restart completed but live verification failed (tunnel/PBR/ICMP) — check logread -e moreprivate_tt_client and VPS [icmp]"
 }
 
 cmd_rollback() {
@@ -3392,7 +3392,7 @@ cmd_status() {
   local tt_up="" tt_l3="" lan_cfg=0 lan_jump=0 lan_accept=0 ip_mark_ok=0
   _ST_FAILS=0
   _ST_WARNS=0
-  echo "=== TrustTunnel OpenWrt status ==="
+  echo "=== MorePrivate tt-client OpenWrt status ==="
   echo
   echo "[install]"
   if [ -x "$BIN" ]; then
@@ -3485,7 +3485,7 @@ cmd_status() {
     else
       _st_fail "tun0 has no active IPv4 route"
     fi
-    if nft get element inet trusttunnel tt_direct4 '{ 1.1.1.1 }' >/dev/null 2>&1; then
+    if nft get element inet moreprivate_tt_client tt_direct4 '{ 1.1.1.1 }' >/dev/null 2>&1; then
       _st_warn "1.1.1.1 is direct; manually test a known non-direct IP checker (expected ${vps_ip})"
     elif direct_ip="$(cloudflare_trace_ip "https://1.1.1.1/cdn-cgi/trace" 8 2>/dev/null)"; then
       if [ "$direct_ip" = "$vps_ip" ]; then
@@ -3561,12 +3561,12 @@ cmd_status() {
       _st_fail "other VPS traffic does not route via tunnel: ${_vps_unmarked:-no route}"
     fi
   fi
-  if nft list set inet trusttunnel tt_direct4 >/dev/null 2>&1; then
+  if nft list set inet moreprivate_tt_client tt_direct4 >/dev/null 2>&1; then
     _st_ok "nft set tt_direct4"
   else
     _st_fail "tt_direct4 not loaded"
   fi
-  if nft list set inet trusttunnel tt_direct_dns4 >/dev/null 2>&1; then
+  if nft list set inet moreprivate_tt_client tt_direct_dns4 >/dev/null 2>&1; then
     _st_ok "nft set tt_direct_dns4 (router DNS only)"
   else
     _st_fail "tt_direct_dns4 not loaded"
@@ -3600,32 +3600,32 @@ cmd_status() {
   fi
   echo
   echo "[lan tunnel path]"
-  if [ "$(uci -q get network.trusttunnel.proto 2>/dev/null)" = "none" ] \
-    && [ "$(uci -q get network.trusttunnel.device 2>/dev/null)" = "tun0" ]; then
-    _st_ok "UCI interface trusttunnel → tun0"
+  if [ "$(uci -q get network.moreprivate_tt_client.proto 2>/dev/null)" = "none" ] \
+    && [ "$(uci -q get network.moreprivate_tt_client.device 2>/dev/null)" = "tun0" ]; then
+    _st_ok "UCI interface moreprivate_tt_client → tun0"
   else
-    _st_fail "UCI interface trusttunnel is not bound to tun0"
+    _st_fail "UCI interface moreprivate_tt_client is not bound to tun0"
   fi
   if command -v ifstatus >/dev/null 2>&1 \
     && command -v jsonfilter >/dev/null 2>&1; then
-    tt_up="$(ifstatus trusttunnel 2>/dev/null | jsonfilter -e '@.up' 2>/dev/null || true)"
-    tt_l3="$(ifstatus trusttunnel 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null || true)"
+    tt_up="$(ifstatus moreprivate_tt_client 2>/dev/null | jsonfilter -e '@.up' 2>/dev/null || true)"
+    tt_l3="$(ifstatus moreprivate_tt_client 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null || true)"
   fi
   if [ "$tt_up" = "true" ] && [ "$tt_l3" = "tun0" ]; then
     _st_ok "netifd interface up, l3_device=tun0"
   else
     _st_fail "netifd interface not ready: up=${tt_up:-unknown} l3_device=${tt_l3:-unknown}"
   fi
-  if [ "$(uci -q get firewall.lan_trusttunnel.src 2>/dev/null)" = "lan" ] \
-    && [ "$(uci -q get firewall.lan_trusttunnel.dest 2>/dev/null)" = "trusttunnel" ]; then
+  if [ "$(uci -q get firewall.lan_moreprivate_tt_client.src 2>/dev/null)" = "lan" ] \
+    && [ "$(uci -q get firewall.lan_moreprivate_tt_client.dest 2>/dev/null)" = "moreprivate_tt_client" ]; then
     lan_cfg=1
-    _st_ok "UCI forwarding lan → trusttunnel"
+    _st_ok "UCI forwarding lan → moreprivate_tt_client"
   else
-    _st_fail "UCI forwarding lan → trusttunnel missing"
+    _st_fail "UCI forwarding lan → moreprivate_tt_client missing"
   fi
-  if [ "$(uci -q get firewall.trusttunnel_icmp_reply.src 2>/dev/null)" = "trusttunnel" ] \
-    && [ "$(uci -q get firewall.trusttunnel_icmp_reply.target 2>/dev/null)" = "ACCEPT" ] \
-    && nft list chain inet fw4 input_trusttunnel 2>/dev/null \
+  if [ "$(uci -q get firewall.moreprivate_tt_client_icmp_reply.src 2>/dev/null)" = "moreprivate_tt_client" ] \
+    && [ "$(uci -q get firewall.moreprivate_tt_client_icmp_reply.target 2>/dev/null)" = "ACCEPT" ] \
+    && nft list chain inet fw4 input_moreprivate_tt_client 2>/dev/null \
       | grep -qE 'echo-reply.*accept|icmp type echo-reply.*accept'; then
     _st_ok "router-local tunneled ICMP echo replies allowed"
   else
@@ -3633,15 +3633,15 @@ cmd_status() {
   fi
   if firewall_lan_tunnel_jump_ready; then
     lan_jump=1
-    _st_ok "active firewall4 forward_lan → accept_to_trusttunnel"
+    _st_ok "active firewall4 forward_lan → accept_to_moreprivate_tt_client"
   else
-    _st_fail "active firewall4 forward_lan has no trusttunnel jump"
+    _st_fail "active firewall4 forward_lan has no moreprivate_tt_client jump"
   fi
   if firewall_tunnel_accept_ready; then
     lan_accept=1
     _st_ok "active firewall4 accepts LAN forwarding to tun0"
   else
-    _st_fail "active firewall4 accept_to_trusttunnel does not accept tun0"
+    _st_fail "active firewall4 accept_to_moreprivate_tt_client does not accept tun0"
   fi
   if tunnel_route_ready; then
     _st_ok "kernel has an IPv4 route through tun0"
@@ -3652,7 +3652,7 @@ cmd_status() {
     _st_info "diagnosis: UCI is configured but firewall4 active state is stale/incomplete"
     _st_info "action: /etc/init.d/firewall restart"
   elif [ "$tt_up" != "true" ] || [ "$tt_l3" != "tun0" ]; then
-    _st_info "diagnosis: netifd has not attached the trusttunnel interface to tun0"
+    _st_info "diagnosis: netifd has not attached the moreprivate_tt_client interface to tun0"
   fi
   load_direct_conf
   echo
@@ -3750,7 +3750,7 @@ cmd_purge() {
   # Goal: router usable with direct WAN after purge.
   # MUST remove TT product that would break or split traffic without TT:
   #   service, binary, PBR/fail-closed nft, direct, mark rule, hotplug, tun0,
-  #   network.trusttunnel, firewall.trusttunnel, lan→trusttunnel.
+  #   network.moreprivate_tt_client, firewall.moreprivate_tt_client, lan→moreprivate_tt_client.
   # MUST keep/ensure direct lan→wan (any shared LAN→WAN forwarding).
   # MUST NOT touch shared host policy (DNS, rebind, wan6/dhcpv6 UCI) —
   # even if install modified them — only REPORT for user review.
@@ -3777,11 +3777,11 @@ cmd_purge() {
 
   log "2/5 remove TT product files + direct policy/PBR/fail-closed + mark + tun"
   rm -f "$INIT" "$GUARD_INIT"
-  rm -f /etc/rc.d/*trusttunnel* 2>/dev/null || true
+  rm -f /etc/rc.d/*moreprivate_tt_client* 2>/dev/null || true
   rm -f "$BIN" "${BIN}.link."*
   rm -f /usr/bin/tt-client-*-linux-*
   # Independent kill switch + hotplug must go before ordinary WAN is restored.
-  nft destroy table inet trusttunnel 2>/dev/null || true
+  nft destroy table inet moreprivate_tt_client 2>/dev/null || true
   rm -f "$PBR_NFT" "$HOTPLUG"
   rm -rf "$TT_DIR"
   while ip rule del priority "$MARK_PRIO" 2>/dev/null; do :; done
@@ -3792,17 +3792,17 @@ cmd_purge() {
     ip link del tun0 2>/dev/null || true
   fi
   # owned sysctl drop-in only (not UCI ipv6 policy)
-  rm -f /etc/sysctl.d/99-trusttunnel-ipv6.conf
+  rm -f /etc/sysctl.d/99-moreprivate_tt_client-ipv6.conf
   sysctl -w net.ipv6.conf.all.disable_ipv6=0 2>/dev/null || true
   sysctl -w net.ipv6.conf.default.disable_ipv6=0 2>/dev/null || true
 
   log "3/5 remove TT zones/forwards; ensure direct lan→wan remains"
-  uci -q delete network.trusttunnel 2>/dev/null || true
+  uci -q delete network.moreprivate_tt_client 2>/dev/null || true
   uci commit network 2>/dev/null || true
-  uci -q delete firewall.trusttunnel 2>/dev/null || true
-  uci -q delete firewall.trusttunnel_icmp_reply 2>/dev/null || true
-  uci -q delete firewall.lan_trusttunnel 2>/dev/null || true
-  uci -q delete firewall.trusttunnel_lan_wan 2>/dev/null || true
+  uci -q delete firewall.moreprivate_tt_client 2>/dev/null || true
+  uci -q delete firewall.moreprivate_tt_client_icmp_reply 2>/dev/null || true
+  uci -q delete firewall.lan_moreprivate_tt_client 2>/dev/null || true
+  uci -q delete firewall.moreprivate_tt_client_lan_wan 2>/dev/null || true
   has_lan_wan=0
   for s in $(uci show firewall 2>/dev/null | sed -n 's/^\(firewall\.[^=]*\)=forwarding$/\1/p'); do
     [ "$(uci -q get "$s.src" 2>/dev/null)" = "lan" ] || continue
@@ -3830,8 +3830,8 @@ cmd_purge() {
   echo "REMOVED (TT product — required so traffic is not stuck/fail-closed):"
   echo "  - services ${INIT}, ${GUARD_INIT}; binary symlink ${BIN}, versioned client binaries"
   echo "  - independent PBR/kill switch, hotplug ${HOTPLUG}, direct policy/config ${TT_DIR}/"
-  echo "  - ip rule prio ${MARK_PRIO}, tun0, sysctl 99-trusttunnel-ipv6.conf"
-  echo "  - UCI network.trusttunnel, firewall.trusttunnel, trusttunnel_icmp_reply, lan_trusttunnel, trusttunnel_lan_wan"
+  echo "  - ip rule prio ${MARK_PRIO}, tun0, sysctl 99-moreprivate_tt_client-ipv6.conf"
+  echo "  - UCI network.moreprivate_tt_client, firewall.moreprivate_tt_client, moreprivate_tt_client_icmp_reply, lan_moreprivate_tt_client, moreprivate_tt_client_lan_wan"
   echo
   echo "DIRECT PATH:"
   if [ "$has_lan_wan" = 0 ]; then
@@ -3870,7 +3870,7 @@ cmd_purge() {
   else
     echo "  ok    gone $TT_DIR"
   fi
-  if [ -f /etc/sysctl.d/99-trusttunnel-ipv6.conf ]; then
+  if [ -f /etc/sysctl.d/99-moreprivate_tt_client-ipv6.conf ]; then
     echo "  FAIL  sysctl drop-in still present"; left=$((left + 1))
   else
     echo "  ok    sysctl drop-in gone"
@@ -3880,30 +3880,30 @@ cmd_purge() {
   else
     echo "  ok    mark rule gone"
   fi
-  if nft list table inet trusttunnel >/dev/null 2>&1; then
+  if nft list table inet moreprivate_tt_client >/dev/null 2>&1; then
     echo "  FAIL  independent nft kill-switch table remains"; left=$((left + 1))
   else
     echo "  ok    independent nft kill-switch table gone"
   fi
-  if uci -q get network.trusttunnel >/dev/null 2>&1; then
-    echo "  FAIL  network.trusttunnel still set"; left=$((left + 1))
+  if uci -q get network.moreprivate_tt_client >/dev/null 2>&1; then
+    echo "  FAIL  network.moreprivate_tt_client still set"; left=$((left + 1))
   else
-    echo "  ok    network.trusttunnel gone"
+    echo "  ok    network.moreprivate_tt_client gone"
   fi
-  if uci -q get firewall.trusttunnel >/dev/null 2>&1 \
-    || uci -q get firewall.trusttunnel_icmp_reply >/dev/null 2>&1 \
-    || uci -q get firewall.lan_trusttunnel >/dev/null 2>&1 \
-    || uci -q get firewall.trusttunnel_lan_wan >/dev/null 2>&1; then
+  if uci -q get firewall.moreprivate_tt_client >/dev/null 2>&1 \
+    || uci -q get firewall.moreprivate_tt_client_icmp_reply >/dev/null 2>&1 \
+    || uci -q get firewall.lan_moreprivate_tt_client >/dev/null 2>&1 \
+    || uci -q get firewall.moreprivate_tt_client_lan_wan >/dev/null 2>&1; then
     echo "  FAIL  TT firewall zone/forward still set"; left=$((left + 1))
   else
     echo "  ok    TT firewall zone/forward gone"
   fi
-  if nft list set inet trusttunnel tt_direct4 >/dev/null 2>&1; then
+  if nft list set inet moreprivate_tt_client tt_direct4 >/dev/null 2>&1; then
     echo "  FAIL  nft tt_direct4 still loaded (PBR not cleared?)"; left=$((left + 1))
   else
     echo "  ok    tt_direct4 not loaded"
   fi
-  if nft list set inet trusttunnel tt_direct_dns4 >/dev/null 2>&1; then
+  if nft list set inet moreprivate_tt_client tt_direct_dns4 >/dev/null 2>&1; then
     echo "  FAIL  nft tt_direct_dns4 still loaded (PBR not cleared?)"; left=$((left + 1))
   else
     echo "  ok    tt_direct_dns4 not loaded"
@@ -3921,7 +3921,7 @@ cmd_purge() {
     echo "  ok    lan→wan forward present (direct)"
   fi
   if client_running; then
-    echo "  FAIL  trusttunnel_client still running"; left=$((left + 1))
+    echo "  FAIL  tt-client still running"; left=$((left + 1))
   else
     echo "  ok    no client process"
   fi

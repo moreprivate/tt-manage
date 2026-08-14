@@ -7,8 +7,9 @@ MANAGE="$ROOT/tt-manage"
 SIGN_DIR="${HOST_TT_SIGN_DIR:-$HOME/.config/tt-mobile}"
 MOBILE_LP="$ROOT/tt-mobile/android/local.properties"
 
-test -f "$SIGN_DIR/trusttunnel.keystore" || {
-  echo "FAIL: missing $SIGN_DIR/trusttunnel.keystore (run tt-mobile aux-setup-android-signing)" >&2
+KEYSTORE="$SIGN_DIR/tt-mobile.keystore"
+test -f "$KEYSTORE" || {
+  echo "FAIL: missing Android keystore under $SIGN_DIR/tt-mobile.keystore" >&2
   exit 1
 }
 test -f "$SIGN_DIR/local.properties" || {
@@ -36,7 +37,7 @@ docker run --rm --user "$(id -u):$(id -g)" \
     # Nested make re-evaluates Makefile; override must win (HOME is /tmp/tt-home).
     make -n build-mobile NATIVE_BUILD=1 \
       HOST_TT_SIGN_DIR="$HOST_TT_SIGN_DIR" \
-      HOST_TT_KEYSTORE="$HOST_TT_SIGN_DIR/trusttunnel.keystore" \
+      HOST_TT_KEYSTORE="$HOST_TT_SIGN_DIR/tt-mobile.keystore" \
       FLUTTER=/workspace/.tt-build/flutter/bin/flutter \
       ANDROID_SDK_ROOT=/workspace/.tt-build/android-sdk \
       2>/dev/null | head -1 >/dev/null || true

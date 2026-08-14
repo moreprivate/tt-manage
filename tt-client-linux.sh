@@ -1,5 +1,5 @@
 #!/bin/sh
-# tt-client-linux.sh — TrustTunnel manager for the current Linux machine.
+# tt-client-linux.sh — MorePrivate tt-client manager for the current Linux machine.
 # Local-machine only: no UCI, netifd, dnsmasq, LAN forwarding, or router state.
 set -eu
 
@@ -35,7 +35,7 @@ toml_get_str() { sed -n "s/^$1[[:space:]]*=[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$
 usage() {
   cat <<EOF
 NAME
-    tt-client-linux.sh ${VERSION_SCRIPT} — TrustTunnel on the current Linux host
+    tt-client-linux.sh ${VERSION_SCRIPT} — MorePrivate tt-client on the current Linux host
 
 SYNOPSIS
     $0 install --config FILE [--binary PATH | --version TAG]
@@ -44,7 +44,7 @@ SYNOPSIS
     $0 enable | disable | rollback | status | purge
 
 DESCRIPTION
-    All local IPv4 traffic is fail-closed into TrustTunnel. Only the configured
+    All local IPv4 traffic is fail-closed into MorePrivate tt-client. Only the configured
     endpoint TCP address and port use the ordinary uplink. No LAN forwarding,
     router firewall, dnsmasq, or OpenWrt state is touched. DNS uses the host's
     existing resolver configuration, but its packets follow the tunnel route.
@@ -115,7 +115,7 @@ download_binary() {
   [ "$expect" = "$got" ] || { rm -rf "$stage"; die "binary checksum mismatch"; }
   chmod 755 "$stage/$asset"
   actual="$($stage/$asset --version 2>/dev/null)" || { rm -rf "$stage"; die "downloaded binary is not runnable"; }
-  embedded="${actual#trusttunnel_client }"
+  embedded="${actual#tt-client }"
   echo "$embedded" | grep -qE '^[0-9]{8}T[0-9]{6}Z-[0-9a-fA-F]{12}$' \
     || { rm -rf "$stage"; die "downloaded client reported invalid embedded version: $actual"; }
   echo "$tag" | grep -qE '^[0-9]{8}T[0-9]{6}Z-[0-9a-fA-F]{12}$' \
@@ -191,8 +191,8 @@ mode="\${1:-start}"
 case "\$mode" in
   start|full)
     nft -f - <<NFT
-destroy table inet trusttunnel
-table inet trusttunnel {
+destroy table inet moreprivate_tt_client
+table inet moreprivate_tt_client {
  chain output_mark { type route hook output priority mangle; policy accept;
    ip protocol tcp ip daddr \$VPS_IP tcp dport \$ENDPOINT_PORT meta mark set \$MARK
    ip protocol udp ip daddr \$VPS_IP udp dport \$ENDPOINT_PORT meta mark set \$MARK
@@ -218,7 +218,7 @@ NFT
     ip route flush cache 2>/dev/null || true
     ;;
   stop)
-    nft delete table inet trusttunnel 2>/dev/null || true
+    nft delete table inet moreprivate_tt_client 2>/dev/null || true
     ip rule del priority "\$PRIO" 2>/dev/null || true
     ip rule del priority $((MARK_PRIO + 1)) 2>/dev/null || true
     ip route flush table "\$TABLE" 2>/dev/null || true
@@ -232,7 +232,7 @@ EOF
 write_units() {
   cat >"$INIT" <<EOF
 [Unit]
-Description=TrustTunnel local client
+Description=MorePrivate tt-client local client
 After=network-online.target tt-client-guard.service
 Wants=network-online.target
 Requires=tt-client-guard.service
@@ -254,7 +254,7 @@ WantedBy=multi-user.target
 EOF
   cat >"$GUARD_INIT" <<EOF
 [Unit]
-Description=TrustTunnel local fail-closed policy
+Description=MorePrivate tt-client local fail-closed policy
 Before=tt-client.service
 After=network-pre.target
 Wants=network-pre.target
@@ -315,7 +315,7 @@ cmd_install() {
   if [ -n "$binary" ]; then src="$binary"; source=local; tag="${tag:-$(binary_tag_from_file "$binary")}"; else tag="${tag:-$(latest_tag)}"; src="$(download_binary "$tag")"; source="github:${GITHUB_REPO}"; fi
   write_client_config "$config"; install_binary "$src" "$tag"; write_policy "$vps" "$port" "$uplink"; write_units; save_meta "$source" "$tag"
   systemctl daemon-reload; systemctl enable "$GUARD_SERVICE_NAME.service" >/dev/null; service_start
-  wait_tunnel || die "TrustTunnel did not create tun0"; verify "$vps"; trap - EXIT; log "install complete"
+  wait_tunnel || die "MorePrivate tt-client did not create tun0"; verify "$vps"; trap - EXIT; log "install complete"
 }
 
 cmd_upgrade() {
@@ -337,7 +337,7 @@ cmd_rollback() {
 }
 cmd_status() {
   local vps="" port="" conf="" tcp_n=0 udp_n=0 active=0
-  echo "=== TrustTunnel Linux status ==="
+  echo "=== MorePrivate tt-client Linux status ==="
   [ -L "$BIN" ] && echo "  binary [*] $(readlink -f "$BIN")" || echo "  FAIL binary missing"
   [ -x "$BIN" ] && echo "  product: $($BIN --version 2>/dev/null | head -1 || echo unknown)"
   if [ -f "$CLIENT_TOML" ]; then

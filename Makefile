@@ -1,4 +1,4 @@
-# TrustTunnel local build chain — same model as GitHub self-hosted runner.
+# MorePrivate local build chain — same model as GitHub self-hosted runner.
 #
 # Public API (this is all you need):
 #
@@ -84,7 +84,7 @@ endif
 # docker-run MUST pass HOST_TT_SIGN_DIR=… on the nested make command line (override)
 # and bind-mount that host path (and under container $HOME/.config/tt-mobile).
 HOST_TT_SIGN_DIR ?= $(abspath $(HOME)/.config/tt-mobile)
-HOST_TT_KEYSTORE ?= $(HOST_TT_SIGN_DIR)/trusttunnel.keystore
+HOST_TT_KEYSTORE ?= $(HOST_TT_SIGN_DIR)/tt-mobile.keystore
 
 # When NATIVE_BUILD=1 we are inside the container (or host-dev).
 # Always use workspace .tt-build tooling — never host ~/flutter or host SDK.
@@ -116,7 +116,7 @@ endif
 
 help:
 	@printf '%s\n' \
-	  'TrustTunnel build (Docker, same idea as the self-hosted GH runner)' \
+	  'MorePrivate build (Docker, same idea as the self-hosted GH runner)' \
 	  '' \
 	  '  make build          Server + client + signed release APKs' \
 	  '  make build-router   Server + client only (OpenWrt / protocol work)' \
@@ -229,7 +229,7 @@ docker-run: check-docker docker-prep
 	      ANDROID_HOME=$(C_ANDROID_SDK) ANDROID_SDK_ROOT=$(C_ANDROID_SDK) \
 	      FLUTTER=$(C_FLUTTER)/bin/flutter \
 	      HOST_TT_SIGN_DIR="$$HOST_TT_SIGN_DIR" \
-	      HOST_TT_KEYSTORE="$$HOST_TT_SIGN_DIR/trusttunnel.keystore" \
+	      HOST_TT_KEYSTORE="$$HOST_TT_SIGN_DIR/tt-mobile.keystore" \
 	  '
 
 build build-chain:
@@ -487,7 +487,7 @@ build-mobile: setup-flutter build-android
 	      props="$$cand"; break; \
 	    fi; \
 	  done; \
-	  ks=''; alias='trusttunnel'; kpass=''; spass=''; \
+	  ks=''; alias='tt-mobile'; kpass=''; spass=''; \
 	  if [ -n "$$props" ]; then \
 	    ks=$$(grep -E '^signingConfigKeyStorePath=' "$$props" | head -1 | cut -d= -f2- || true); \
 	    alias=$$(grep -E '^signingConfigKeyAlias=' "$$props" | head -1 | cut -d= -f2- || true); \
@@ -496,20 +496,20 @@ build-mobile: setup-flutter build-android
 	  fi; \
 	  if [ ! -f "$$ks" ]; then \
 	    for cand in '$(HOST_TT_KEYSTORE)' \
-	      '$(HOST_TT_SIGN_DIR)/trusttunnel.keystore' \
-	      "$${HOME}/.config/tt-mobile/trusttunnel.keystore"; do \
+	      '$(HOST_TT_SIGN_DIR)/tt-mobile.keystore' \
+	      "$${HOME}/.config/tt-mobile/tt-mobile.keystore"; do \
 	      if [ -f "$$cand" ]; then ks="$$cand"; break; fi; \
 	    done; \
 	  fi; \
 	  if [ ! -f "$$ks" ] || [ -z "$$kpass" ] || [ -z "$$spass" ]; then \
 	    echo "error: release signing not configured for replaceable APKs." >&2; \
 	    echo "  Once:  cd $(MOBILE_DIR) && make aux-setup-android-signing" >&2; \
-	    echo "         → \$$HOME/.config/tt-mobile/trusttunnel.keystore" >&2; \
+	    echo "         → \$$HOME/.config/tt-mobile/tt-mobile.keystore" >&2; \
 	    echo "  (Docker resolves via HOST_TT_SIGN_DIR=$(HOST_TT_SIGN_DIR))" >&2; \
 	    exit 1; \
 	  fi; \
 	  export ORG_GRADLE_PROJECT_signingConfigKeyStorePath="$$ks"; \
-	  export ORG_GRADLE_PROJECT_signingConfigKeyAlias="$${alias:-trusttunnel}"; \
+	  export ORG_GRADLE_PROJECT_signingConfigKeyAlias="$${alias:-tt-mobile}"; \
 	  export ORG_GRADLE_PROJECT_signingConfigKeyPassword="$$kpass"; \
 	  export ORG_GRADLE_PROJECT_signingConfigKeyStorePassword="$$spass"; \
 	fi; \

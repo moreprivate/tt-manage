@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MF="$ROOT/Makefile"
 fail() { echo "FAIL: $*" >&2; exit 1; }
 
-grep -q 'BUILD_IMAGE ?= adguard/core-libs:2.12' "$MF" || fail "BUILD_IMAGE pin"
+grep -q 'BUILD_IMAGE ?= adguard/core-libs@sha256:26f7e1c6c19b1e2c90a8938e6c763469787fbaeff94f8c5a887b947aa8858f5e' "$MF" || fail "BUILD_IMAGE digest pin"
 grep -q 'FLUTTER_VERSION ?= 3.44.8' "$MF" || fail "FLUTTER_VERSION pin"
 grep -q 'platforms;android-36' "$MF" || fail "android-36"
 grep -q 'build-tools;35.0.0' "$MF" || fail "build-tools"
@@ -39,9 +39,15 @@ if awk '/^clean:/{p=1;next} p&&/^[^#[:space:]]/{exit} p' "$MF" | grep -q "rm -rf
   fail "make clean must not rm -rf entire OUT_DIR (use distclean)"
 fi
 
-# Signing candidate loop must not list repo-tree android/local.properties
-if grep -A80 '^build-mobile:' "$MF" | grep -B5 -A5 'signingConfigKeyStorePath' \
-  | grep -q 'MOBILE_DIR)/android/local.properties'; then
+# Signing candidate loop must not list repo-tree android/local.properties.
+# Limit the inspection to the candidate loop; later sdk.dir generation is expected.
+candidate_block=$(awk '
+  /^build-mobile:/ { in_mobile=1 }
+  in_mobile && /for cand in/ { capture=1; left=12 }
+  capture && left-- > 0 { print }
+  capture && left == 0 { exit }
+' "$MF")
+if printf '%s\n' "$candidate_block" | grep -q 'MOBILE_DIR)/android/local.properties'; then
   fail "build-mobile must not load signing from MOBILE_DIR/android/local.properties"
 fi
 # sdk.dir rewrite of that file is OK; secrets must only come from HOST_TT_SIGN_DIR / HOME

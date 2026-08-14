@@ -1,7 +1,7 @@
-# TrustTunnel management
+# MorePrivate tt-* management
 
 `tt-manage` contains deployment scripts and the local build chain for the
-TrustTunnel server, native client, and Flutter Android app.
+MorePrivate tt-* server, native client, and Flutter Android app.
 
 | File | Runs on | Scope |
 |---|---|---|
@@ -29,7 +29,7 @@ bash tt-server.sh add-user router
 ```
 
 `--custom-sni` is mandatory and must be an ASCII DNS hostname. Profiles are
-written under `/opt/trusttunnel/clients/`. New profiles default to
+written under `/opt/moreprivate/tt-server/clients/`. New profiles default to
 `upstream_protocol = "http2"` and `http_connections_num = 0` (the client
 default). Override the transport with `--upstream-protocol auto|http2|http3`.
 The endpoint supports H2 and H3. A server with no users is a valid deny-all
@@ -93,12 +93,11 @@ make clean          # remove caches/intermediates, keep products
 make distclean      # remove products and all .tt-build tooling
 ```
 
-The chain uses Docker (`adguard/core-libs:2.12`) and keeps tools and outputs
+The chain uses Docker with a pinned `adguard/core-libs` image and keeps tools and outputs
 under `../.tt-build`; it does not depend on a host Flutter or Android SDK.
 Create the persistent signing key once with
 `(cd ../tt-mobile && make aux-setup-android-signing)`. Outputs are placed
-under `.tt-build/server`, `.tt-build/client`, and
-`.tt-build/tt-mobile-*-release.apk`.
+under `.tt-build/server`, `.tt-build/client`, and `.tt-build/mobile`.
 
 The scheduled GitHub workflow **Build release chain** dispatches the component
 workflows in order: server, client, then mobile. Component workflows are
