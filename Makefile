@@ -42,9 +42,9 @@ C_OUT := /workspace/.tt-build
 C_FLUTTER := $(C_OUT)/flutter
 C_ANDROID_SDK := $(C_OUT)/android-sdk
 C_HOME := /tmp/tt-home
-C_CARGO := /opt/cargo
+C_CARGO := /tmp/tt-cargo
 C_RUSTUP := /tmp/tt-rustup
-C_CONAN := /conan
+C_CONAN := /tmp/tt-conan
 C_GRADLE := /tmp/tt-gradle
 C_PUB := /tmp/tt-pub
 
@@ -171,7 +171,7 @@ docker-run: check-docker docker-prep
 	  -e CONAN_HOME=$(C_CONAN) \
 	  -e GRADLE_USER_HOME=$(C_GRADLE) \
 	  -e PUB_CACHE=$(C_PUB) \
-	  -e PATH=$(C_CARGO)/bin:/opt/cargo/bin:/opt/zig:/usr/lib/llvm-21/bin:/opt/cmake/bin:$(C_FLUTTER)/bin:$(C_ANDROID_SDK)/cmdline-tools/latest/bin:$(C_ANDROID_SDK)/platform-tools:/usr/local/bin:/usr/bin:/bin \
+	  -e PATH=$(C_CARGO)/bin:/opt/cargo/bin:/opt/rustup/bin:/opt/zig:/usr/lib/llvm-21/bin:/opt/cmake/bin:$(C_FLUTTER)/bin:$(C_ANDROID_SDK)/cmdline-tools/latest/bin:$(C_ANDROID_SDK)/platform-tools:/usr/local/bin:/usr/bin:/bin \
 	  -e ANDROID_HOME=$(C_ANDROID_SDK) \
 	  -e ANDROID_SDK_ROOT=$(C_ANDROID_SDK) \
 	  -e ANDROID_NDK_HOME=$(C_ANDROID_SDK)/ndk/29.0.14206865 \
@@ -545,7 +545,7 @@ build-mobile: setup-flutter build-android
 	test -f '$(OUT_DIR)/mobile/tt-mobile-$(MOBILE_VERSION)-arm64-v8a-release.apk'; \
 	ls -lah '$(OUT_DIR)/mobile'/tt-mobile-*-release.apk
 
-build-router-native: check-cross
+build-router-native: setup-cross check-cross
 	$(MAKE) build-server
 	$(MAKE) build-client
 	@echo "Router build complete: $(OUT_DIR)/server $(OUT_DIR)/client"

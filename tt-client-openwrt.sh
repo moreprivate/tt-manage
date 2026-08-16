@@ -625,7 +625,7 @@ download_release_binary() {
   chmod 755 "${stage}/${asset}"
   actual="$("${stage}/${asset}" --version 2>/dev/null)" \
     || { rm -rf "$stage"; die "downloaded client binary is not runnable"; }
-  embedded="${actual#tt-client }"
+  embedded="$(printf '%s\n' "$actual" | awk '{print $NF}')"
   echo "$embedded" | grep -qE '^[0-9]{8}T[0-9]{6}Z-[0-9a-fA-F]{12}$' \
     || { rm -rf "$stage"; die "downloaded client reported invalid embedded version '${actual}'"; }
   echo "$tag" | grep -qE '^[0-9]{8}T[0-9]{6}Z-[0-9a-fA-F]{12}$' \
@@ -2249,9 +2249,18 @@ status_report_transport() {
 
 client_pids() {
   if command -v pidof >/dev/null 2>&1; then
-    pidof tt-client 2>/dev/null || true
+    pids=""
+    target=""
+    if [ -L "$BIN" ]; then
+      target="$(basename "$(readlink -f "$BIN" 2>/dev/null || true)")"
+    fi
+    if [ -n "$target" ]; then
+      pids="$pids $(pidof "$target" 2>/dev/null || true)"
+    fi
+    pids="$pids $(pidof tt-client 2>/dev/null || true)"
+    printf '%s\n' $pids | awk '{ for (i = 1; i <= NF; i++) if (!seen[$i]++) print $i }'
   elif command -v pgrep >/dev/null 2>&1; then
-    pgrep -f '^/usr/bin/tt-client([[:space:]]|$)' 2>/dev/null || true
+    pgrep -f '^/usr/bin/tt-client(-[^[:space:]]+)?([[:space:]]|$)' 2>/dev/null || true
   fi
 }
 
@@ -2267,9 +2276,13 @@ client_latest_vpn_state() {
   local pid="$1"
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   tt_log_tail 400 | awk -v tag="tt-client[${pid}]:" '
-    index($0, tag) && /VPN_SS_/ {
+    index($0, tag) && (/VPN_SS_/ || /VPN_STATE[[:space:]]/) {
       line = $0
-      sub(/^.*VPN_SS_/, "VPN_SS_", line)
+      if (line ~ /VPN_STATE[[:space:]]/) {
+        sub(/^.*VPN_STATE[[:space:]]*/, "VPN_SS_", line)
+      } else {
+        sub(/^.*VPN_SS_/, "VPN_SS_", line)
+      }
       sub(/[^A-Z_].*$/, "", line)
       state = line
     }
@@ -2416,11 +2429,9 @@ need_pkgs() {
 # Recent log lines mentioning moreprivate_tt_client / VPN (logread -e optional on old builds)
 tt_log_tail() {
   local n="${1:-60}"
-  # shellcheck disable=SC2015
-  {
-    logread -e moreprivate_tt_client 2>/dev/null \
-      || logread 2>/dev/null | grep -i moreprivate_tt_client
-  } | tail -n "$n" 2>/dev/null || true
+  logread 2>/dev/null \
+    | grep -Ei 'moreprivate_tt_client|tt-client|VPN_SS_|VPN_STATE[[:space:]]' \
+    | tail -n "$n" 2>/dev/null || true
 }
 
 tunnel_route_ready() {
@@ -2435,7 +2446,10 @@ verify_tunnel() {
     pid="$(client_single_pid 2>/dev/null || true)"
     state=""
     [ -z "$pid" ] || state="$(client_latest_vpn_state "$pid" 2>/dev/null || true)"
-    if [ "$state" = "VPN_SS_CONNECTED" ] && tunnel_route_ready; then
+    # VPN_SS_CONNECTED is a transition log, not persistent state: after enough
+    # DNS/application log lines it may no longer be in the bounded log window.
+    # The live process plus tun0 route are the authoritative current checks.
+    if tunnel_route_ready && { [ -z "$state" ] || [ "$state" = "VPN_SS_CONNECTED" ]; }; then
       # Restore the owned /32 after the client recreates table 880.
       if [ -f "$PBR_NFT" ]; then
         vps_ip="$(parse_vps_ip "$CLIENT_TOML")" || return 1

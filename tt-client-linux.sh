@@ -1,6 +1,6 @@
 #!/bin/sh
 # tt-client-linux.sh — MorePrivate tt-client manager for the current Linux machine.
-# Local-machine only: no UCI, netifd, dnsmasq, LAN forwarding, or router state.
+# Local-machine only: no UCI, netifd, LAN forwarding, or router state.
 set -eu
 
 VERSION_SCRIPT="0.1.2"
@@ -8,12 +8,19 @@ TT_DIR="/etc/moreprivate/tt-client"
 CLIENT_TOML="${TT_DIR}/client.toml"
 DIRECT_CONF="${TT_DIR}/direct.conf"
 RELEASE_META="${TT_DIR}/release.env"
+RESOLV_BACKUP="${TT_DIR}/resolv.conf.original"
+RESOLV_CONF="/etc/resolv.conf"
+DNSMASQ_CONF="${TT_DIR}/dnsmasq.conf"
+DNSMASQ_PID="${TT_DIR}/dnsmasq.pid"
 POLICY="/usr/local/libexec/moreprivate-tt-client-policy"
 BIN="/usr/local/bin/tt-client"
 INIT="/etc/systemd/system/tt-client.service"
 GUARD_INIT="/etc/systemd/system/tt-client-guard.service"
+DNSMASQ_INIT="/etc/systemd/system/moreprivate-tt-dnsmasq.service"
 SERVICE_NAME="tt-client"
 GUARD_SERVICE_NAME="tt-client-guard"
+DNSMASQ_SERVICE_NAME="moreprivate-tt-dnsmasq"
+DNSMASQ_BIN=""
 GITHUB_REPO="${TT_GITHUB_REPO:-moreprivate/tt-client}"
 MARK="0x8802"
 MARK_PRIO="20000"
@@ -46,8 +53,8 @@ SYNOPSIS
 DESCRIPTION
     All local IPv4 traffic is fail-closed into MorePrivate tt-client. Only the configured
     endpoint TCP address and port use the ordinary uplink. No LAN forwarding,
-    router firewall, dnsmasq, or OpenWrt state is touched. DNS uses the host's
-    existing resolver configuration, but its packets follow the tunnel route.
+    router firewall, or OpenWrt state is touched. A dedicated dnsmasq instance
+    owns 127.0.0.1:53 and forwards DNS through the tunnel.
     LIST values accept commas or whitespace. Config: upstream_protocol auto|http2|http3
     (profiles from add-user default to http3). status reports live H2/H3 via ss.
 
@@ -115,7 +122,7 @@ download_binary() {
   [ "$expect" = "$got" ] || { rm -rf "$stage"; die "binary checksum mismatch"; }
   chmod 755 "$stage/$asset"
   actual="$($stage/$asset --version 2>/dev/null)" || { rm -rf "$stage"; die "downloaded binary is not runnable"; }
-  embedded="${actual#tt-client }"
+  embedded="$(printf '%s\n' "$actual" | awk '{print $NF}')"
   echo "$embedded" | grep -qE '^[0-9]{8}T[0-9]{6}Z-[0-9a-fA-F]{12}$' \
     || { rm -rf "$stage"; die "downloaded client reported invalid embedded version: $actual"; }
   echo "$tag" | grep -qE '^[0-9]{8}T[0-9]{6}Z-[0-9a-fA-F]{12}$' \
@@ -157,7 +164,7 @@ install_binary() {
   fi
   "$target" --version >/dev/null 2>&1 || die "binary is not runnable: $target"
   ln -sfn "$(basename "$target")" "$BIN"
-  echo "  $($target --version)"
+  echo "  $($target --version 2>/dev/null)"
 }
 
 save_meta() {
@@ -177,8 +184,39 @@ write_client_config() {
     || die 'config must use upstream_protocol = "auto", "http2", or "http3"'
   cp "$src" "$tmp"
   if grep -qE '^exclusions[[:space:]]*=' "$tmp"; then sed -i 's/^exclusions[[:space:]]*=.*/exclusions = []/' "$tmp"; else printf '\nexclusions = []\n' >>"$tmp"; fi
-  if grep -qE '^change_system_dns[[:space:]]*=' "$tmp"; then sed -i 's/^change_system_dns[[:space:]]*=.*/change_system_dns = false/' "$tmp"; fi
+  # The manager owns the host resolver via a dedicated dnsmasq instance.  Do
+  # not let tt-client rewrite resolv.conf or race the manager's listener.
+  if grep -qE '^change_system_dns[[:space:]]*=' "$tmp"; then sed -i 's/^change_system_dns[[:space:]]*=.*/change_system_dns = false/' "$tmp"; else printf '\nchange_system_dns = false\n' >>"$tmp"; fi
   chmod 600 "$tmp"; mv -f "$tmp" "$CLIENT_TOML"
+}
+
+configure_resolver() {
+  local tmp="${RESOLV_CONF}.moreprivate.$$"
+  [ -e "$RESOLV_BACKUP" ] || cp -a "$RESOLV_CONF" "$RESOLV_BACKUP" 2>/dev/null || true
+  printf '%s\n' '# Managed by MorePrivate tt-client; restored on purge' \
+    'nameserver 127.0.0.1' >"$tmp"
+  chmod 644 "$tmp"
+  rm -f "$RESOLV_CONF"
+  mv -f "$tmp" "$RESOLV_CONF"
+}
+
+write_dnsmasq() {
+  DNSMASQ_BIN="$(command -v dnsmasq 2>/dev/null || true)"
+  [ -n "$DNSMASQ_BIN" ] || die "dnsmasq is required for the Linux host resolver"
+  cat >"$DNSMASQ_CONF" <<EOF
+listen-address=127.0.0.1
+bind-interfaces
+no-resolv
+no-hosts
+server=1.1.1.1
+server=1.0.0.1
+pid-file=$DNSMASQ_PID
+EOF
+  chmod 600 "$DNSMASQ_CONF"
+}
+
+restore_resolver() {
+  [ -e "$RESOLV_BACKUP" ] && mv -f "$RESOLV_BACKUP" "$RESOLV_CONF" || true
 }
 
 write_policy() {
@@ -198,6 +236,9 @@ table inet moreprivate_tt_client {
    ip protocol udp ip daddr \$VPS_IP udp dport \$ENDPOINT_PORT meta mark set \$MARK
  }
  chain output_guard { type filter hook output priority filter - 1; policy accept;
+   oifname "lo" accept
+   ip daddr 127.0.0.0/8 accept
+   ip6 daddr ::1 accept
    oifname != "tun0" ip protocol tcp ip daddr \$VPS_IP tcp dport \$ENDPOINT_PORT accept
    oifname != "tun0" ip protocol udp ip daddr \$VPS_IP udp dport \$ENDPOINT_PORT accept
    oifname != "tun0" counter reject
@@ -207,7 +248,7 @@ NFT
     while ip rule del priority "\$PRIO" 2>/dev/null; do :; done
     ip rule add priority "\$PRIO" fwmark "\$MARK/0xffffffff" lookup main
     # Keep the kernel's existing endpoint route (including its gateway). A
-    # synthetic `dev UPLINK` /32 can incorrectly ARP for a remote VPS.
+    # A synthetic dev UPLINK /32 can incorrectly ARP for a remote VPS.
     ip rule del priority $((MARK_PRIO + 1)) 2>/dev/null || true
     ip rule add priority $((MARK_PRIO + 1)) unreachable
     if [ "\$mode" = full ] && ip link show tun0 >/dev/null 2>&1; then
@@ -244,8 +285,8 @@ ExecStart=$BIN -c $CLIENT_TOML
 ExecStartPost=$POLICY full
 Restart=always
 RestartSec=5
-AmbientCapabilities=CAP_NET_RAW
-CapabilityBoundingSet=CAP_NET_RAW
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_NET_BIND_SERVICE
 NoNewPrivileges=true
 LimitNOFILE=65536
 
@@ -264,11 +305,30 @@ Type=oneshot
 RemainAfterExit=yes
 ExecStart=$POLICY start
 ExecStop=$POLICY stop
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW
+NoNewPrivileges=true
 
 [Install]
 WantedBy=multi-user.target
 EOF
-  chmod 644 "$INIT" "$GUARD_INIT"
+  cat >"$DNSMASQ_INIT" <<EOF
+[Unit]
+Description=MorePrivate local DNS forwarder
+After=$SERVICE_NAME.service
+Requires=$SERVICE_NAME.service
+
+[Service]
+Type=simple
+ExecStart=$DNSMASQ_BIN --keep-in-foreground --conf-file=$DNSMASQ_CONF
+ExecReload=/bin/kill -HUP \$MAINPID
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  chmod 644 "$INIT" "$GUARD_INIT" "$DNSMASQ_INIT"
 }
 
 uplink_dev() { ip route get "$1" | sed -n 's/.* dev \([^ ]*\).*/\1/p' | head -1; }
@@ -279,17 +339,63 @@ wait_tunnel() {
 }
 
 verify() {
-  local vps="$1" route ipout
+  local vps="$1" route ipout dns numeric_ip hostname_ip
   ip link show tun0 >/dev/null 2>&1 || die "tun0 is not present"
   route="$(ip route get "$vps" 2>/dev/null)"
   echo "$route" | grep -q 'dev tun0' || die "endpoint non-marked traffic is not routed through tun0: $route"
-  ipout=""
-  if command -v curl >/dev/null 2>&1; then ipout="$(curl -4fsS --max-time 20 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | sed -n 's/^ip=//p' | head -1)"; fi
-  if [ -n "$ipout" ] && [ "$ipout" = "$vps" ]; then log "OK local tunnel egress IP=$ipout"; else echo "WARNING: automatic egress identity unavailable or unexpected (${ipout:-none}); check with a non-direct IP checker"; fi
+  echo "  check DNS resolution"
+  dns=""
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    dns="$(timeout 3s getent hosts google.com 2>/dev/null | head -1 || true)"
+    [ -n "$dns" ] && break
+    sleep 1
+  done
+  [ -n "$dns" ] || die "DNS validation failed: google.com cannot be resolved through the tunnel"
+  echo "  dns: ok ($dns)"
+  command -v curl >/dev/null 2>&1 || die "curl is required for egress validation"
+  echo "  check numeric Cloudflare egress"
+  numeric_ip="$(timeout 25s curl -4fsSL --max-time 20 https://1.1.1.1/cdn-cgi/trace 2>/dev/null | sed -n 's/^ip=//p' | head -1)"
+  echo "  check hostname Cloudflare egress"
+  hostname_ip="$(timeout 25s curl -4fsSL --max-time 20 https://cloudflare.com/cdn-cgi/trace 2>/dev/null | sed -n 's/^ip=//p' | head -1)"
+  [ -n "$numeric_ip" ] || die "numeric egress validation failed"
+  [ -n "$hostname_ip" ] || die "hostname egress validation failed"
+  [ "$numeric_ip" = "$vps" ] || die "numeric egress IP $numeric_ip does not match VPS_IP $vps"
+  [ "$hostname_ip" = "$vps" ] || die "hostname egress IP $hostname_ip does not match VPS_IP $vps"
+  log "OK tunnel egress: numeric=$numeric_ip hostname=$hostname_ip"
   echo "  route: $route"
 }
 
-service_start() { systemctl enable --now "$SERVICE_NAME.service" >/dev/null; }
+service_start() {
+  systemctl enable "$SERVICE_NAME.service" >/dev/null
+  echo "==> start $SERVICE_NAME.service"
+  if ! timeout 30s systemctl start "$SERVICE_NAME.service"; then
+    echo "error: $SERVICE_NAME.service failed to start" >&2
+    systemctl status "$SERVICE_NAME.service" --no-pager -l >&2 || true
+    journalctl -u "$SERVICE_NAME.service" -n 40 --no-pager >&2 || true
+    return 1
+  fi
+}
+guard_start() {
+  systemctl enable "$GUARD_SERVICE_NAME.service" >/dev/null
+  echo "==> start $GUARD_SERVICE_NAME.service"
+  if ! timeout 30s systemctl start "$GUARD_SERVICE_NAME.service"; then
+    echo "error: $GUARD_SERVICE_NAME.service failed to start" >&2
+    systemctl status "$GUARD_SERVICE_NAME.service" --no-pager -l >&2 || true
+    journalctl -u "$GUARD_SERVICE_NAME.service" -n 40 --no-pager >&2 || true
+    return 1
+  fi
+}
+dnsmasq_start() {
+  systemctl enable "$DNSMASQ_SERVICE_NAME.service" >/dev/null
+  echo "==> start $DNSMASQ_SERVICE_NAME.service"
+  if ! timeout 30s systemctl start "$DNSMASQ_SERVICE_NAME.service"; then
+    echo "error: $DNSMASQ_SERVICE_NAME.service failed to start (is another service using 127.0.0.1:53?)" >&2
+    systemctl status "$DNSMASQ_SERVICE_NAME.service" --no-pager -l >&2 || true
+    journalctl -u "$DNSMASQ_SERVICE_NAME.service" -n 40 --no-pager >&2 || true
+    return 1
+  fi
+}
+dnsmasq_stop() { systemctl stop "$DNSMASQ_SERVICE_NAME.service" >/dev/null 2>&1 || true; }
 service_stop() { systemctl stop "$SERVICE_NAME.service" >/dev/null 2>&1 || true; }
 service_restart() { systemctl restart "$SERVICE_NAME.service"; }
 
@@ -309,13 +415,14 @@ cmd_install() {
   local config="" binary="" tag="" src source vps port uplink
   while [ "$#" -gt 0 ]; do case "$1" in --config) config="$2"; shift 2;; --binary) binary="$2"; shift 2;; --version) tag="$2"; shift 2;; *) die "unknown install option: $1";; esac; done
   [ -n "$config" ] || die "install requires --config FILE"; [ ! -e "$CLIENT_TOML" ] || die "already installed; use upgrade or purge"
-  trap 'rc=$?; if [ "$rc" -ne 0 ]; then systemctl stop "$SERVICE_NAME.service" >/dev/null 2>&1 || true; systemctl disable "$SERVICE_NAME.service" "$GUARD_SERVICE_NAME.service" >/dev/null 2>&1 || true; "$POLICY" stop >/dev/null 2>&1 || true; rm -f "$INIT" "$GUARD_INIT" "$POLICY" "$CLIENT_TOML" "$DIRECT_CONF" "$RELEASE_META" "$BIN"; rm -f /usr/local/bin/tt-client-*-linux-*; systemctl daemon-reload >/dev/null 2>&1 || true; fi; exit "$rc"' EXIT
+  trap 'rc=$?; if [ "$rc" -ne 0 ]; then dnsmasq_stop; systemctl stop "$SERVICE_NAME.service" >/dev/null 2>&1 || true; systemctl disable "$SERVICE_NAME.service" "$GUARD_SERVICE_NAME.service" "$DNSMASQ_SERVICE_NAME.service" >/dev/null 2>&1 || true; "$POLICY" stop >/dev/null 2>&1 || true; restore_resolver; rm -f "$INIT" "$GUARD_INIT" "$DNSMASQ_INIT" "$DNSMASQ_CONF" "$DNSMASQ_PID" "$POLICY" "$CLIENT_TOML" "$DIRECT_CONF" "$RELEASE_META" "$BIN"; rm -f /usr/local/bin/tt-client-*-linux-*; systemctl daemon-reload >/dev/null 2>&1 || true; fi; exit "$rc"' EXIT
   need_file "$config"; mkdir -p "$TT_DIR" /usr/local/libexec
   vps="$(parse_vps_ip "$config")"; port="$(parse_vps_port "$config")"; uplink="$(uplink_dev "$vps")"; [ -n "$uplink" ] || die "cannot determine uplink for endpoint"
+  configure_resolver
   if [ -n "$binary" ]; then src="$binary"; source=local; tag="${tag:-$(binary_tag_from_file "$binary")}"; else tag="${tag:-$(latest_tag)}"; src="$(download_binary "$tag")"; source="github:${GITHUB_REPO}"; fi
-  write_client_config "$config"; install_binary "$src" "$tag"; write_policy "$vps" "$port" "$uplink"; write_units; save_meta "$source" "$tag"
-  systemctl daemon-reload; systemctl enable "$GUARD_SERVICE_NAME.service" >/dev/null; service_start
-  wait_tunnel || die "MorePrivate tt-client did not create tun0"; verify "$vps"; trap - EXIT; log "install complete"
+  write_client_config "$config"; install_binary "$src" "$tag"; write_policy "$vps" "$port" "$uplink"; write_dnsmasq; write_units; save_meta "$source" "$tag"
+  systemctl daemon-reload; guard_start; service_start
+  echo "==> wait for tun0"; wait_tunnel || die "MorePrivate tt-client did not create tun0"; dnsmasq_start; echo "==> validate DNS and egress"; verify "$vps"; trap - EXIT; log "install complete"
 }
 
 cmd_upgrade() {
@@ -325,7 +432,7 @@ cmd_upgrade() {
   OLD_BIN="$(readlink -f "$BIN")"; NEW_BIN=""; trap upgrade_rollback EXIT
   vps="$(parse_vps_ip "$CLIENT_TOML")"; port="$(parse_vps_port "$CLIENT_TOML")"; uplink="$(uplink_dev "$vps")"
   if [ -n "$binary" ]; then src="$binary"; source=local; tag="${tag:-$(binary_tag_from_file "$binary")}"; else tag="${tag:-$(latest_tag)}"; src="$(download_binary "$tag")"; source="github:${GITHUB_REPO}"; fi
-  service_stop; install_binary "$src" "$tag"; NEW_BIN="$(readlink -f "$BIN")"; write_policy "$vps" "$port" "$uplink"; write_units; save_meta "$source" "$tag"; systemctl daemon-reload; service_start; wait_tunnel || die "upgrade did not restore tun0"; verify "$vps"; trap - EXIT
+  service_stop; configure_resolver; install_binary "$src" "$tag"; NEW_BIN="$(readlink -f "$BIN")"; write_policy "$vps" "$port" "$uplink"; write_dnsmasq; write_units; save_meta "$source" "$tag"; systemctl daemon-reload; service_start; wait_tunnel || die "upgrade did not restore tun0"; dnsmasq_start; verify "$vps"; trap - EXIT
 }
 
 cmd_update_creds() { local cfg="$2"; [ "$1" = --config ] || die "update-creds requires --config FILE"; write_client_config "$cfg"; service_restart; }
@@ -375,9 +482,10 @@ cmd_status() {
     echo "  info  live transport: not tested (ss/endpoint missing)"
   fi
 }
-cmd_purge() { service_stop; systemctl disable "$SERVICE_NAME.service" "$GUARD_SERVICE_NAME.service" >/dev/null 2>&1 || true; systemctl daemon-reload; "$POLICY" stop 2>/dev/null || true; rm -f "$INIT" "$GUARD_INIT" "$POLICY" "$CLIENT_TOML" "$DIRECT_CONF" "$RELEASE_META" "$BIN"; rm -f /usr/local/bin/tt-client-*-linux-*; rmdir "$TT_DIR" 2>/dev/null || true; systemctl daemon-reload; log "purged TT-owned local state"; }
+cmd_purge() { dnsmasq_stop; service_stop; systemctl disable "$SERVICE_NAME.service" "$GUARD_SERVICE_NAME.service" "$DNSMASQ_SERVICE_NAME.service" >/dev/null 2>&1 || true; systemctl daemon-reload; "$POLICY" stop 2>/dev/null || true; restore_resolver; rm -f "$INIT" "$GUARD_INIT" "$DNSMASQ_INIT" "$DNSMASQ_CONF" "$DNSMASQ_PID" "$POLICY" "$CLIENT_TOML" "$DIRECT_CONF" "$RELEASE_META" "$BIN"; rm -f /usr/local/bin/tt-client-*-linux-*; rmdir "$TT_DIR" 2>/dev/null || true; systemctl daemon-reload; log "purged TT-owned local state"; }
 
-cmd="${1:-help}"; shift || true
+cmd="${1:-help}"
+[ "$#" -eq 0 ] || shift
 announce_start
 case "$cmd" in
   help|-h|--help) usage; exit 0 ;;
