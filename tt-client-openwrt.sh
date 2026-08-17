@@ -19,14 +19,17 @@ DIRECT_DNS_EL="${TT_DIR}/direct-dns-elements.nft"
 DIRECT_ZONE="${TT_DIR}/direct.zone"
 DIRECT_CONF="${TT_DIR}/direct.conf"
 WAN_DEV_FILE="${TT_DIR}/wan.dev"
+WAN_IF_FILE="${TT_DIR}/wan.if"
 HOTPLUG="/etc/hotplug.d/iface/95-moreprivate_tt_client-pbr"
 DNS_ENV="${TT_DIR}/dns.env"
 TT_DNS="${TT_DIR}/tt-dns.sh"
 RELEASE_META="${TT_DIR}/release.env"
 WAN_SHAPE_CONF="${TT_DIR}/wan-shape.conf"
 GITHUB_REPO="${TT_GITHUB_REPO:-moreprivate/tt-client}"
-# UCI logical interface (hotplug / ifstatus)
-WAN_IF="wan"
+# UCI logical interface or explicit netdev (hotplug / ifstatus). Override with
+# --wan-if; otherwise retain the installed selection, defaulting to wan.
+WAN_IF="$(cat "$WAN_IF_FILE" 2>/dev/null || true)"
+[ -n "$WAN_IF" ] || WAN_IF="wan"
 # UCI section name for TT-managed SQM/CAKE (do not collide with manual sqm.*)
 SQM_UCI_SECTION="moreprivate_tt_client"
 MARK_PRIO="20000"
@@ -177,6 +180,9 @@ DESCRIPTION
     --tunnel-dns-servers LIST
         Resolver IPv4 addresses for every other name.
         Default: ${TUNNEL_DNS_SERVERS_DEFAULT}
+    --wan-if IFACE
+        WAN logical interface or netdev used for endpoint transport and PBR.
+        Default: wan (the install selection is persisted).
     Direct mode is fail-safe only as a complete profile. If either direct IP
     source is configured, direct DNS domains and direct DNS servers are
     required. Tunnel DNS server IPs may be inside or outside that list.
@@ -192,6 +198,11 @@ DESCRIPTION
         --binary PATH   local file instead of a release
     install is clean-only and refuses complete or partial MorePrivate tt-client state.
     Use upgrade/update-* for an installed system, or purge before reinstalling.
+
+    WAN interface:
+        --wan-if selects the logical UCI WAN interface or an explicit netdev
+        (default: wan). The manager writes listener.tun.bound_if automatically;
+        do not set bound_if in the server profile for OpenWrt.
 
     install tries a one-shot sync using the existing NTP configuration, then
     tries a plain-HTTP timestamp from 1.1.1.1. Clock failure only warns and
@@ -784,6 +795,10 @@ apply_direct_stack() {
 # Prefer live ifstatus l3_device; then UCI; then saved file; then logical name.
 get_wan_dev() {
   local d=""
+  if ip link show "$WAN_IF" >/dev/null 2>&1; then
+    echo "$WAN_IF"
+    return 0
+  fi
   if command -v ifstatus >/dev/null 2>&1 && command -v jsonfilter >/dev/null 2>&1; then
     d="$(ifstatus "$WAN_IF" 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null || true)"
     [ -n "$d" ] && { echo "$d"; return 0; }
@@ -804,6 +819,12 @@ save_wan_dev() {
   mkdir -p "$TT_DIR" || return 1
   echo "$1" >"$WAN_DEV_FILE" || return 1
   chmod 644 "$WAN_DEV_FILE" || return 1
+}
+
+save_wan_if() {
+  mkdir -p "$TT_DIR" || return 1
+  printf '%s\n' "$WAN_IF" >"$WAN_IF_FILE" || return 1
+  chmod 644 "$WAN_IF_FILE"
 }
 
 # --- TOML / config ---
@@ -2712,6 +2733,7 @@ cmd_install() {
       --direct-dns-domains) need_arg "$1" "${2:-}"; direct_dns_domains="$2"; shift 2 ;;
       --direct-dns-servers) need_arg "$1" "${2:-}"; direct_dns_servers="$2"; shift 2 ;;
       --tunnel-dns-servers) need_arg "$1" "${2:-}"; tunnel_dns_servers="$2"; shift 2 ;;
+      --wan-if) need_arg "$1" "${2:-}"; WAN_IF="$2"; shift 2 ;;
       -h|--help) usage; exit 0 ;;
       *) die "install: unknown option $1" ;;
     esac
@@ -2791,6 +2813,7 @@ cmd_install() {
   log "client.toml"
   install_client_toml "$config" "$wan_dev"
   save_wan_dev "$wan_dev"
+  save_wan_if
 
   log "direct routing"
   mkdir -p "$TT_DIR"
@@ -3084,6 +3107,7 @@ cmd_update_direct() {
       --direct-dns-domains) need_arg "$1" "${2:-}"; direct_dns_domains="$2"; shift 2 ;;
       --direct-dns-servers) need_arg "$1" "${2:-}"; direct_dns_servers="$2"; shift 2 ;;
       --tunnel-dns-servers) need_arg "$1" "${2:-}"; tunnel_dns_servers="$2"; shift 2 ;;
+      --wan-if) need_arg "$1" "${2:-}"; WAN_IF="$2"; shift 2 ;;
       -h|--help) usage; exit 0 ;;
       *) die "update-direct: unknown option $1" ;;
     esac

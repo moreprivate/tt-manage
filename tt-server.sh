@@ -970,13 +970,9 @@ health_check_timeout_ms = ${HEALTH_CHECK_TIMEOUT_MS}
 anti_dpi = false
 dns_upstreams = ["1.1.1.1", "1.0.0.1"]
 
-# OpenWrt: set bound_if to your WAN device (e.g. "wan").
-# Apps that own the tunnel can ignore [listener].
-
 [listener]
 
 [listener.tun]
-# bound_if = "wan"
 included_routes = ["0.0.0.0/0"]
 excluded_routes = [
     "0.0.0.0/8",

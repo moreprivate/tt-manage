@@ -41,6 +41,8 @@ state.
 sh tt-client-openwrt.sh install --config ./router.toml
 sh tt-client-openwrt.sh install --config ./router.toml \\
   --direct-countries "nl ch"
+# Nonstandard UCI WAN interface:
+sh tt-client-openwrt.sh install --config ./router.toml --wan-if wan2
 ```
 
 Country mode derives IPv4 ranges from IPdeny, DNS suffixes from country codes,
@@ -48,6 +50,9 @@ and direct resolvers from WAN DNS. `--direct-ip-file`,
 `--direct-dns-domains`, and `--direct-dns-servers` override those automatic
 values. LAN clients must use the router for DNS. The endpoint TCP port uses
 WAN; other traffic to the server IP, including SSH, uses the tunnel.
+`--wan-if IFACE` selects the logical UCI WAN interface or an explicit WAN
+netdev (default `wan`); the manager resolves/uses it and writes
+`listener.tun.bound_if` in the installed client configuration.
 
 The script disables IPv6 by default and does not modify OpenWrt NTP settings.
 It performs only a best-effort clock check before HTTPS/package operations.
