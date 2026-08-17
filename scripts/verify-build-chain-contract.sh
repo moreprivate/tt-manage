@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Static + structural contract: local make build matches self-hosted CI model,
-# and signing is discovered from host $HOME/.config/tt-mobile inside Docker.
+# and signing is discovered from host $HOME/.config/moreprivate/tt-mobile inside Docker.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 MF="$ROOT/Makefile"
@@ -28,7 +28,7 @@ fi
 # Nested make must pass host-absolute HOST_TT_SIGN_DIR (not re-expand HOME inside container)
 grep -q 'HOST_TT_SIGN_DIR=' "$MF" || fail "HOST_TT_SIGN_DIR missing"
 grep -q 'HOST_TT_SIGN_DIR="\$\$HOST_TT_SIGN_DIR"' "$MF" || fail "docker-run must pass HOST_TT_SIGN_DIR to nested make"
-grep -q 'C_HOME)/.config/tt-mobile' "$MF" || fail "must bind-mount signing under container HOME/.config/tt-mobile"
+grep -q 'C_HOME)/.config/moreprivate/tt-mobile' "$MF" || fail "must bind-mount signing under container HOME/.config/moreprivate/tt-mobile"
 
 # Public clean API is only clean + distclean; clean keeps products
 grep -q '^clean:' "$MF" || fail "missing clean"

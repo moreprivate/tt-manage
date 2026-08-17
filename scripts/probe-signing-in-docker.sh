@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Prove signing is discoverable inside the same Docker entry as make build,
-# using only $HOME/.config/tt-mobile on the host (no repo-tree local.properties).
+# using only $HOME/.config/moreprivate/tt-mobile on the host (no repo-tree local.properties).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 MANAGE="$ROOT/tt-manage"
-SIGN_DIR="${HOST_TT_SIGN_DIR:-$HOME/.config/tt-mobile}"
+SIGN_DIR="${HOST_TT_SIGN_DIR:-$HOME/.config/moreprivate/tt-mobile}"
 MOBILE_LP="$ROOT/tt-mobile/android/local.properties"
 
 KEYSTORE="$SIGN_DIR/tt-mobile.keystore"
@@ -29,7 +29,7 @@ docker run --rm --user "$(id -u):$(id -g)" \
   -e HOST_TT_SIGN_DIR="$HOST_ABS" \
   -v "$ROOT":/workspace \
   -v "$HOST_ABS":"$HOST_ABS":ro \
-  -v "$HOST_ABS":/tmp/tt-home/.config/tt-mobile:ro \
+  -v "$HOST_ABS":/tmp/tt-home/.config/moreprivate/tt-mobile:ro \
   -w /workspace/tt-manage \
   adguard/core-libs:2.12 \
   bash -euo pipefail -c '
@@ -46,7 +46,7 @@ docker run --rm --user "$(id -u):$(id -g)" \
     props=""
     for cand in \
       "$HOST_TT_SIGN_DIR/local.properties" \
-      "$HOME/.config/tt-mobile/local.properties"; do
+      "$HOME/.config/moreprivate/tt-mobile/local.properties"; do
       if [ -f "$cand" ] && grep -q "^signingConfigKeyStorePath=" "$cand"; then
         props="$cand"
         break

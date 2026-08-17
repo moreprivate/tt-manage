@@ -10,7 +10,7 @@
 #   make distclean      delete everything under .tt-build/ (products too)
 #   make help           this list
 #
-# Host: Docker only (+ $HOME/.config/tt-mobile for APK signing).
+# Host: Docker only (+ $HOME/.config/moreprivate/tt-mobile for APK signing).
 # Image: pinned adguard/core-libs digest. Tools live under .tt-build/ (not ~/flutter).
 
 SHELL := /bin/bash
@@ -84,8 +84,8 @@ endif
 # Signing only (secret). Not a toolchain. Never in git.
 # Freeze host path at outer make parse time. Inside Docker HOME is /tmp/tt-home, so
 # docker-run MUST pass HOST_TT_SIGN_DIR=… on the nested make command line (override)
-# and bind-mount that host path (and under container $HOME/.config/tt-mobile).
-HOST_TT_SIGN_DIR ?= $(abspath $(HOME)/.config/tt-mobile)
+# and bind-mount that host path (and under container $HOME/.config/moreprivate/tt-mobile).
+HOST_TT_SIGN_DIR ?= $(abspath $(HOME)/.config/moreprivate/tt-mobile)
 HOST_TT_KEYSTORE ?= $(HOST_TT_SIGN_DIR)/tt-mobile.keystore
 
 # When NATIVE_BUILD=1 we are inside the container (or host-dev).
@@ -133,7 +133,7 @@ help:
 	  'Products (kept by clean):  $(OUT_DIR)/server/  client/  mobile/' \
 	  'Needs: Docker + image $(BUILD_IMAGE)' \
 	  'APK signing once:  cd ../tt-mobile && make aux-setup-android-signing' \
-	  '                   → $$HOME/.config/tt-mobile/' \
+	  '                   → $$HOME/.config/moreprivate/tt-mobile/' \
 	  '' \
 	  'Typical loops:' \
 	  '  make build-client              # after client code changes' \
@@ -204,7 +204,7 @@ docker-run: check-docker docker-prep
 	  -v '$(DOCKER_CONAN_HOME)':$(C_CONAN) \
 	  -v '$(DOCKER_PUB_CACHE)':$(C_PUB) \
 	  -v '$(HOST_TT_SIGN_DIR)':'$(HOST_TT_SIGN_DIR)':ro \
-	  -v '$(HOST_TT_SIGN_DIR)':$(C_HOME)/.config/tt-mobile:ro \
+	  -v '$(HOST_TT_SIGN_DIR)':$(C_HOME)/.config/moreprivate/tt-mobile:ro \
 	  -w /workspace/tt-manage \
 	  '$(BUILD_IMAGE)' \
 	  bash -euo pipefail -c '\
@@ -492,7 +492,7 @@ build-android-native: setup-android
 	cp -a '$(CLIENT_DIR)/platform/android/lib/build/maven-repo/.' \
 	  '$(MOBILE_DIR)/third_party/tt-client-maven/'
 
-# Signing comes only from $HOME/.config/tt-mobile (HOST_TT_SIGN_DIR), never from
+# Signing comes only from $HOME/.config/moreprivate/tt-mobile (HOST_TT_SIGN_DIR), never from
 # repo-tree android/local.properties (that file is for sdk.dir only and is cleaned).
 build-mobile-native: setup-flutter
 	@set -euo pipefail; \
@@ -500,7 +500,7 @@ build-mobile-native: setup-flutter
 	  props=''; \
 	  for cand in \
 	    '$(HOST_TT_SIGN_DIR)/local.properties' \
-	    "$${HOME}/.config/tt-mobile/local.properties"; do \
+	    "$${HOME}/.config/moreprivate/tt-mobile/local.properties"; do \
 	    if [ -f "$$cand" ] && grep -q '^signingConfigKeyStorePath=' "$$cand"; then \
 	      props="$$cand"; break; \
 	    fi; \
@@ -515,14 +515,14 @@ build-mobile-native: setup-flutter
 	  if [ ! -f "$$ks" ]; then \
 	    for cand in '$(HOST_TT_KEYSTORE)' \
 	      '$(HOST_TT_SIGN_DIR)/tt-mobile.keystore' \
-	      "$${HOME}/.config/tt-mobile/tt-mobile.keystore"; do \
+	      "$${HOME}/.config/moreprivate/tt-mobile/tt-mobile.keystore"; do \
 	      if [ -f "$$cand" ]; then ks="$$cand"; break; fi; \
 	    done; \
 	  fi; \
 	  if [ ! -f "$$ks" ] || [ -z "$$kpass" ] || [ -z "$$spass" ]; then \
 	    echo "error: release signing not configured for replaceable APKs." >&2; \
 	    echo "  Once:  cd $(MOBILE_DIR) && make aux-setup-android-signing" >&2; \
-	    echo "         → \$$HOME/.config/tt-mobile/tt-mobile.keystore" >&2; \
+	    echo "         → \$$HOME/.config/moreprivate/tt-mobile/tt-mobile.keystore" >&2; \
 	    echo "  (Docker resolves via HOST_TT_SIGN_DIR=$(HOST_TT_SIGN_DIR))" >&2; \
 	    exit 1; \
 	  fi; \
