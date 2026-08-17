@@ -61,7 +61,8 @@ sh tt-client-linux.sh install --config ./host.toml
 ```
 
 This changes only the current Linux host; it does not configure OpenWrt,
-dnsmasq, UCI, LAN forwarding, or another machine.
+UCI, LAN forwarding, or another machine. It does manage a dedicated local
+`dnsmasq` instance on `127.0.0.1:53` for tunnel-routed DNS.
 
 ## Lifecycle and verification
 
