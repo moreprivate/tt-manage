@@ -70,6 +70,12 @@ All scripts support `status`, `upgrade`, `rollback`, `disable`, `enable`, and
 `purge`; `install` is clean-only. Successful upgrades retain one previous
 binary, and failed upgrades leave the active version untouched.
 
+`disable` is platform-specific. On OpenWrt it leaves the router's direct
+routing behavior available, which is intentional for router operation. On a
+Linux host it leaves the fail-closed policy active, so it effectively disables
+Internet access. Use `enable` to resume the tunnel; on Linux, use `purge` only
+when you want to remove MorePrivate routing and restore ordinary direct WAN.
+
 ```sh
 bash tt-server.sh status
 sh tt-client-openwrt.sh status

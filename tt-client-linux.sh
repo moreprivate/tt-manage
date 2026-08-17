@@ -14,10 +14,10 @@ DNSMASQ_CONF="${TT_DIR}/dnsmasq.conf"
 DNSMASQ_PID="${TT_DIR}/dnsmasq.pid"
 POLICY="/usr/local/libexec/moreprivate-tt-client-policy"
 BIN="/usr/local/bin/tt-client"
-INIT="/etc/systemd/system/tt-client.service"
+INIT="/etc/systemd/system/moreprivate-tt-client-linux.service"
 GUARD_INIT="/etc/systemd/system/tt-client-guard.service"
 DNSMASQ_INIT="/etc/systemd/system/moreprivate-tt-dnsmasq.service"
-SERVICE_NAME="tt-client"
+SERVICE_NAME="moreprivate-tt-client-linux"
 GUARD_SERVICE_NAME="tt-client-guard"
 DNSMASQ_SERVICE_NAME="moreprivate-tt-dnsmasq"
 DNSMASQ_BIN=""
@@ -62,8 +62,10 @@ DESCRIPTION
     Releases from ${GITHUB_REPO}; checksums and embedded binary version verified.
 
     install is clean-only. Use upgrade for an installed host, rollback to switch
-    to the previous successful binary, disable/enable for service control, and
-    purge to remove TT-owned files and restore ordinary routing.
+    to the previous successful binary, and enable/disable for tunnel service
+    control. On Linux, disable stops the tunnel but leaves fail-closed routing
+    active, effectively disabling Internet access. Use purge to remove
+    TT-owned files and restore ordinary routing.
 EOF
 }
 
@@ -296,7 +298,7 @@ EOF
   cat >"$GUARD_INIT" <<EOF
 [Unit]
 Description=MorePrivate tt-client local fail-closed policy
-Before=tt-client.service
+Before=$SERVICE_NAME.service
 After=network-pre.target
 Wants=network-pre.target
 
@@ -418,8 +420,11 @@ cmd_install() {
   trap 'rc=$?; if [ "$rc" -ne 0 ]; then dnsmasq_stop; systemctl stop "$SERVICE_NAME.service" >/dev/null 2>&1 || true; systemctl disable "$SERVICE_NAME.service" "$GUARD_SERVICE_NAME.service" "$DNSMASQ_SERVICE_NAME.service" >/dev/null 2>&1 || true; "$POLICY" stop >/dev/null 2>&1 || true; restore_resolver; rm -f "$INIT" "$GUARD_INIT" "$DNSMASQ_INIT" "$DNSMASQ_CONF" "$DNSMASQ_PID" "$POLICY" "$CLIENT_TOML" "$DIRECT_CONF" "$RELEASE_META" "$BIN"; rm -f /usr/local/bin/tt-client-*-linux-*; systemctl daemon-reload >/dev/null 2>&1 || true; fi; exit "$rc"' EXIT
   need_file "$config"; mkdir -p "$TT_DIR" /usr/local/libexec
   vps="$(parse_vps_ip "$config")"; port="$(parse_vps_port "$config")"; uplink="$(uplink_dev "$vps")"; [ -n "$uplink" ] || die "cannot determine uplink for endpoint"
-  configure_resolver
+  # Resolve/download a release while the host resolver is still intact.  The
+  # managed 127.0.0.1 resolver is installed only after this step; dnsmasq is
+  # not started until the service has been prepared below.
   if [ -n "$binary" ]; then src="$binary"; source=local; tag="${tag:-$(binary_tag_from_file "$binary")}"; else tag="${tag:-$(latest_tag)}"; src="$(download_binary "$tag")"; source="github:${GITHUB_REPO}"; fi
+  configure_resolver
   write_client_config "$config"; install_binary "$src" "$tag"; write_policy "$vps" "$port" "$uplink"; write_dnsmasq; write_units; save_meta "$source" "$tag"
   systemctl daemon-reload; guard_start; service_start
   echo "==> wait for tun0"; wait_tunnel || die "MorePrivate tt-client did not create tun0"; dnsmasq_start; echo "==> validate DNS and egress"; verify "$vps"; trap - EXIT; log "install complete"
@@ -436,8 +441,15 @@ cmd_upgrade() {
 }
 
 cmd_update_creds() { local cfg="$2"; [ "$1" = --config ] || die "update-creds requires --config FILE"; write_client_config "$cfg"; service_restart; }
-cmd_enable() { systemctl enable --now "$SERVICE_NAME.service"; }
-cmd_disable() { systemctl disable --now "$SERVICE_NAME.service"; }
+cmd_enable() {
+  systemctl enable --now "$SERVICE_NAME.service"
+  # dnsmasq Requires=$SERVICE_NAME.service and is therefore stopped when the
+  # client is disabled; bring it back explicitly so 127.0.0.1 remains live.
+  dnsmasq_start
+}
+cmd_disable() {
+  systemctl disable --now "$SERVICE_NAME.service"
+}
 cmd_rollback() {
   local cur prev
   cur="$(readlink -f "$BIN")"; prev="$(find /usr/local/bin -maxdepth 1 -type f -name 'tt-client-*-linux-*' ! -path "$cur" | head -1)"; [ -n "$prev" ] || die "no previous binary available"; service_stop; ln -sfn "$(basename "$prev")" "$BIN"; service_start
