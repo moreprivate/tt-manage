@@ -88,7 +88,9 @@ From `tt-manage/`:
 
 ```sh
 make check
-make build-router   # server + client targets
+make build-server   # server targets (x86_64 + aarch64)
+make build-client   # all Linux client binaries + Android AAR
+make build-mobile   # client outputs + signed Android APKs
 make build          # server + client + signed Android APKs
 make clean          # remove caches/intermediates, keep products
 make distclean      # remove products and all .tt-build tooling

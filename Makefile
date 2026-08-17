@@ -3,7 +3,9 @@
 # Public API (this is all you need):
 #
 #   make build          full product (server + client + signed APKs)
-#   make build-router   server + OpenWrt/linux client only
+#   make build-server   server targets only
+#   make build-client   all Linux client binaries + Android AAR
+#   make build-mobile   client outputs + signed Android APKs
 #   make clean          refresh build junk; keep finished products
 #   make distclean      delete everything under .tt-build/ (products too)
 #   make help           this list
@@ -100,14 +102,16 @@ else
   FLUTTER_BIN := $(TOOL_FLUTTER)/bin
 endif
 
-.PHONY: help build build-router clean distclean \
-	build-chain build-chain-native build-router-native \
+.PHONY: help build clean distclean \
+	build-chain build-chain-native \
 	check check-repos check-docker check-cross check-mobile \
 	setup-cross setup-client setup-android setup-flutter setup-android-sdk \
 	build-server build-client build-android build-mobile \
+	build-server-native build-client-native build-android-native build-mobile-native \
 	docker-prep docker-run
 
-.NOTPARALLEL: build build-router build-chain build-chain-native build-router-native \
+.NOTPARALLEL: build build-server build-client build-mobile \
+	build-chain build-chain-native \
 	clean distclean
 
 # ---------------------------------------------------------------------------
@@ -119,7 +123,9 @@ help:
 	  'MorePrivate build (Docker, same idea as the self-hosted GH runner)' \
 	  '' \
 	  '  make build          Server + client + signed release APKs' \
-	  '  make build-router   Server + client only (OpenWrt / protocol work)' \
+	  '  make build-server   Server targets only (x86_64 + aarch64)' \
+	  '  make build-client   Linux x86_64/aarch64/mipsel binaries + Android AAR' \
+	  '  make build-mobile   Client outputs + signed Android APKs' \
 	  '  make clean          Clear caches & intermediate trees; keep products' \
 	  '  make distclean      Delete all of $(OUT_DIR)/ (products + caches)' \
 	  '  make help           This message' \
@@ -130,7 +136,7 @@ help:
 	  '                   → $$HOME/.config/tt-mobile/' \
 	  '' \
 	  'Typical loops:' \
-	  '  make build-router              # after client/server code changes' \
+	  '  make build-client              # after client code changes' \
 	  '  make clean && make build       # full product refresh' \
 	  '  make distclean && make build   # only if tooling is corrupted'
 
@@ -155,7 +161,7 @@ check-docker: check-repos
 	@'$(DOCKER)' image inspect '$(BUILD_IMAGE)' >/dev/null 2>&1 \
 	  || { echo "pulling $(BUILD_IMAGE)"; '$(DOCKER)' pull '$(BUILD_IMAGE)'; }
 
-# GOAL = make target inside container (build-router-native | build-chain-native)
+# GOAL = internal target executed inside the build container.
 # Always --user $(id -u):$(id -g). Never omit --user (default container user can be root).
 docker-run: check-docker docker-prep
 	@test -n '$(GOAL)' || { echo 'docker-run requires GOAL=...' >&2; exit 1; }
@@ -238,10 +244,21 @@ build build-chain:
 	@ls -lah '$(OUT_DIR)/mobile' 2>/dev/null || true
 	@ls -lah '$(OUT_DIR)/server' '$(OUT_DIR)/client' 2>/dev/null || true
 
-build-router:
-	@$(MAKE) docker-run GOAL=build-router-native
-	@echo "==> Router build complete:"
-	@ls -lah '$(OUT_DIR)/server' '$(OUT_DIR)/client' 2>/dev/null || true
+build-server:
+	@$(MAKE) docker-run GOAL=build-server-native
+	@echo "==> Server build complete:"
+	@ls -lah '$(OUT_DIR)/server' 2>/dev/null || true
+
+build-client:
+	@$(MAKE) docker-run GOAL=build-client-native
+	@echo "==> Client build complete (Linux binaries + Android AAR):"
+	@ls -lah '$(OUT_DIR)/client' 2>/dev/null || true
+
+build-mobile:
+	@$(MAKE) build-client
+	@$(MAKE) docker-run GOAL=build-mobile-native
+	@echo "==> Mobile build complete:"
+	@ls -lah '$(OUT_DIR)/mobile' 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 # Checks (inside container when NATIVE_BUILD=1)
@@ -423,7 +440,7 @@ setup-android: setup-android-sdk setup-client
 # Build graph (inside container)
 # ---------------------------------------------------------------------------
 
-build-server: check-cross setup-cross
+build-server-native: check-cross setup-cross
 	@mkdir -p '$(OUT_DIR)/server'
 	@set -e; for arch in $(SERVER_ARCHES); do \
 	  case "$$arch" in \
@@ -440,7 +457,7 @@ build-server: check-cross setup-cross
 	    scripts/ci/build-musl-target.sh "$$arch" '$(SERVER_VERSION)' "$$output"); \
 	done
 
-build-client: check-cross setup-cross setup-client
+build-client-native: check-cross setup-cross setup-client
 	@mkdir -p '$(OUT_DIR)/client' '$(OUT_DIR)/host-cc'
 	@set -e; \
 	wrap='$(OUT_DIR)/host-cc'; \
@@ -461,8 +478,9 @@ build-client: check-cross setup-cross setup-client
 	  output="$(OUT_DIR)/client/tt-client-$(CLIENT_VERSION)-linux-$$arch"; \
 	  llvm-strip -o "$$output" "$$input"; chmod 755 "$$output"; \
 	done
+	$(MAKE) build-android-native
 
-build-android: setup-android
+build-android-native: setup-android
 	@mkdir -p '$(MOBILE_DIR)/third_party/tt-client-maven'
 	@rm -f '$(CLIENT_DIR)/platform/android/local.properties'
 	@printf 'sdk.dir=%s\ncmake.dir=%s\n' '$(ANDROID_SDK_ROOT)' '$(ANDROID_SDK_ROOT)/cmake/3.31.6' \
@@ -476,7 +494,7 @@ build-android: setup-android
 
 # Signing comes only from $HOME/.config/tt-mobile (HOST_TT_SIGN_DIR), never from
 # repo-tree android/local.properties (that file is for sdk.dir only and is cleaned).
-build-mobile: setup-flutter build-android
+build-mobile-native: setup-flutter
 	@set -euo pipefail; \
 	if [ -z "$${ORG_GRADLE_PROJECT_signingConfigKeyStorePath:-}" ]; then \
 	  props=''; \
@@ -545,17 +563,12 @@ build-mobile: setup-flutter build-android
 	test -f '$(OUT_DIR)/mobile/tt-mobile-$(MOBILE_VERSION)-arm64-v8a-release.apk'; \
 	ls -lah '$(OUT_DIR)/mobile'/tt-mobile-*-release.apk
 
-build-router-native: setup-cross check-cross
-	$(MAKE) build-server
-	$(MAKE) build-client
-	@echo "Router build complete: $(OUT_DIR)/server $(OUT_DIR)/client"
-
 build-chain-native: check-cross
-	$(MAKE) build-server
-	$(MAKE) build-client
+	$(MAKE) build-server-native
+	$(MAKE) build-client-native
 	$(MAKE) setup-flutter
 	$(MAKE) setup-android-sdk
-	$(MAKE) build-mobile
+	$(MAKE) build-mobile-native
 	@echo "Build chain complete: $(OUT_DIR)"
 
 # ---------------------------------------------------------------------------
