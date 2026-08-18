@@ -53,6 +53,9 @@ C_PUB := /tmp/tt-pub
 CLIENT_ENV := $(CLIENT_DIR)/env
 CLIENT_PYTHON := $(CLIENT_ENV)/bin/python
 CLIENT_CONAN := $(CLIENT_ENV)/bin/conan
+# The bootstrap cache probe must use a checked-in profile.  Never create or
+# consult Conan's runner-dependent `default` profile during product builds.
+CLIENT_BOOTSTRAP_PROFILE := $(CLIENT_DIR)/scripts/conan-profiles/build-linux
 
 # Match the component workflows: release identity is the newest source commit
 # (excluding workflow-only edits), formatted as UTC timestamp plus short SHA.
@@ -382,8 +385,9 @@ setup-client:
 	    fi; \
 	  fi; \
 	  echo "Using system Conan: $$(conan --version)"; \
-	  conan profile detect --force; \
-	  if (cd '$(CLIENT_DIR)' && conan graph info . --profile:host=default >/dev/null 2>&1); then \
+	  if (cd '$(CLIENT_DIR)' && conan graph info . \
+	      --profile:host='$(CLIENT_BOOTSTRAP_PROFILE)' \
+	      --profile:build='$(CLIENT_BOOTSTRAP_PROFILE)' >/dev/null 2>&1); then \
 	    echo "Conan dependencies already bootstrapped, skipping clone/export."; \
 	  else \
 	    cd '$(CLIENT_DIR)' && python3 scripts/bootstrap_conan_deps.py; \
@@ -424,8 +428,9 @@ setup-client:
 	fi; \
 	'$(CLIENT_CONAN)' --version >/dev/null \
 	  || { echo "error: conan still not runnable in $(CLIENT_ENV)" >&2; exit 1; }; \
-	PATH="$(CLIENT_ENV)/bin:$$PATH" '$(CLIENT_CONAN)' profile detect --force; \
-	if (cd '$(CLIENT_DIR)' && PATH="$(CLIENT_ENV)/bin:$$PATH" conan graph info . --profile:host=default >/dev/null 2>&1); then \
+	if (cd '$(CLIENT_DIR)' && PATH="$(CLIENT_ENV)/bin:$$PATH" conan graph info . \
+	    --profile:host='$(CLIENT_BOOTSTRAP_PROFILE)' \
+	    --profile:build='$(CLIENT_BOOTSTRAP_PROFILE)' >/dev/null 2>&1); then \
 	  echo "Conan dependencies already bootstrapped, skipping clone/export."; \
 	else \
 	  cd '$(CLIENT_DIR)' && PATH="$(CLIENT_ENV)/bin:$$PATH" '$(CLIENT_PYTHON)' scripts/bootstrap_conan_deps.py; \
