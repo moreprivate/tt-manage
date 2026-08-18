@@ -13,7 +13,7 @@ INSTALL_DIR="/opt/moreprivate/tt-server"
 SERVICE_USER="moreprivate"
 SERVICE_NAME="moreprivate-tt-server"
 CUSTOM_SNI=""
-HTTP_CONNECTIONS_NUM=0
+HTTP_CONNECTIONS_NUM=4
 # Tolerate last-mile bufferbloat under load (library default health check is 7s).
 HEALTH_CHECK_TIMEOUT_MS=15000
 UPSTREAM_PROTOCOL="http2"
@@ -331,7 +331,7 @@ DESCRIPTION
         Autogen strong password (never printed).
         Writes credentials.toml [[client]] + ${CLIENTS_DIR}/<name>.toml (0600).
         Generated clients use the install-time protocol (default http2;
-        http_connections_num=${HTTP_CONNECTIONS_NUM}; 0 = client default of 8).
+        http_connections_num=${HTTP_CONNECTIONS_NUM}; 0 = client library default of 8).
         Starts/restarts the endpoint. Copy the .toml to clients.
 
     del-user <name>

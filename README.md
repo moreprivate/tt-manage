@@ -30,8 +30,10 @@ bash tt-server.sh add-user router
 
 `--custom-sni` is mandatory and must be an ASCII DNS hostname. Profiles are
 written under `/opt/moreprivate/tt-server/clients/`. New profiles default to
-`upstream_protocol = "http2"` and `http_connections_num = 0` (the client
-default). Override the transport with `--upstream-protocol auto|http2|http3`.
+`upstream_protocol = "http2"` and `http_connections_num = 4`. Override the
+connection count in the TOML when needed; `0` retains the client library
+fallback of 8. Override the transport with
+`--upstream-protocol auto|http2|http3`.
 The endpoint supports H2 and H3. A server with no users is a valid deny-all
 state.
 
