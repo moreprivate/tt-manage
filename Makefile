@@ -27,6 +27,7 @@ BUILD_IMAGE ?= adguard/core-libs@sha256:26f7e1c6c19b1e2c90a8938e6c763469787fbaef
 # Pinned the same way as tt-mobile CI (build-mobile-targets.yml).
 FLUTTER_VERSION ?= 3.44.8
 FLUTTER_GIT ?= https://github.com/flutter/flutter.git
+FLUTTER_REF ?= 058e0af2c2b57e369d905a03ac9748b0ebf543c6
 
 # All caches under OUT_DIR (user-owned). Paths are host paths; Docker bind-mounts them.
 DOCKER_HOME := $(OUT_DIR)/docker-home
@@ -71,7 +72,8 @@ CLIENT_ARCHES ?= x86_64 aarch64 mipsel
 IMAGE_ANDROID_SDK := /storage/android-sdk
 IMAGE_SDKMANAGER := $(IMAGE_ANDROID_SDK)/cmdline-tools/latest/bin/sdkmanager
 IMAGE_NDK := $(IMAGE_ANDROID_SDK)/ndk/29.0.14206865
-ANDROID_PLATFORM := platforms;android-36
+ANDROID_CLIENT_PLATFORM := platforms;android-35
+ANDROID_MOBILE_PLATFORM := platforms;android-36
 ANDROID_BUILD_TOOLS := build-tools;35.0.0
 ANDROID_NDK_PKG := ndk;29.0.14206865
 ANDROID_CMAKE_PKG := cmake;3.31.6
@@ -180,6 +182,12 @@ docker-run: check-docker docker-prep
 	  -e CONAN_HOME=$(C_CONAN) \
 	  -e GRADLE_USER_HOME=$(C_GRADLE) \
 	  -e PUB_CACHE=$(C_PUB) \
+	  -e TZ=UTC \
+	  -e LC_ALL=C \
+	  -e LANG=C \
+	  -e RUSTFLAGS='--remap-path-prefix=/workspace/tt-server=/tt-server --remap-path-prefix=/workspace/tt-client=/tt-client --remap-path-prefix=/workspace/tt-mobile=/tt-mobile --remap-path-prefix=/tmp/tt-cargo=/cargo --remap-path-prefix=/tmp/tt-rustup=/rustup' \
+	  -e CFLAGS='-ffile-prefix-map=/workspace/tt-server=/tt-server -ffile-prefix-map=/workspace/tt-client=/tt-client -ffile-prefix-map=/workspace/tt-mobile=/tt-mobile -ffile-prefix-map=/tmp/tt-conan=/conan-package -fmacro-prefix-map=/tmp/tt-conan=/conan-package -ffile-compilation-dir=/build' \
+	  -e CXXFLAGS='-ffile-prefix-map=/workspace/tt-server=/tt-server -ffile-prefix-map=/workspace/tt-client=/tt-client -ffile-prefix-map=/workspace/tt-mobile=/tt-mobile -ffile-prefix-map=/tmp/tt-conan=/conan-package -fmacro-prefix-map=/tmp/tt-conan=/conan-package -ffile-compilation-dir=/build' \
 	  -e PATH=$(C_CARGO)/bin:/opt/cargo/bin:/opt/rustup/bin:/opt/zig:/usr/lib/llvm-21/bin:/opt/cmake/bin:$(C_FLUTTER)/bin:$(C_ANDROID_SDK)/cmdline-tools/latest/bin:$(C_ANDROID_SDK)/platform-tools:/usr/local/bin:/usr/bin:/bin \
 	  -e ANDROID_HOME=$(C_ANDROID_SDK) \
 	  -e ANDROID_SDK_ROOT=$(C_ANDROID_SDK) \
@@ -286,6 +294,10 @@ check-mobile: check-repos
 	@test -x '$(FLUTTER)' || { echo "missing Flutter at $(FLUTTER) — run setup-flutter" >&2; exit 1; }
 	@test -d '$(ANDROID_SDK_ROOT)/platforms' \
 	  || { echo "missing Android platforms under $(ANDROID_SDK_ROOT) — run setup-android-sdk" >&2; exit 1; }
+	@test -d '$(ANDROID_SDK_ROOT)/platforms/android-35' \
+	  || { echo "missing Android platform 35 under $(ANDROID_SDK_ROOT)" >&2; exit 1; }
+	@test -d '$(ANDROID_SDK_ROOT)/platforms/android-36' \
+	  || { echo "missing Android platform 36 under $(ANDROID_SDK_ROOT)" >&2; exit 1; }
 	@test -x '$(ANDROID_SDK_ROOT)/cmake/3.31.6/bin/cmake' \
 	  || { echo "missing Android CMake 3.31.6 under $(ANDROID_SDK_ROOT)" >&2; exit 1; }
 	@test -d '$(ANDROID_SDK_ROOT)/ndk/29.0.14206865' \
@@ -301,18 +313,21 @@ endif
 # Tooling bootstrap (inside container — mirrors CI "Install native build tools")
 # ---------------------------------------------------------------------------
 
-# Flutter: git clone pinned tag into .tt-build/flutter (CI: RUNNER_TEMP/flutter @ 3.44.8)
+# Flutter: clone the exact commit used by mobile CI.
 setup-flutter:
 	@set -euo pipefail; \
 	fl='$(if $(filter 1,$(NATIVE_BUILD)),$(C_FLUTTER),$(TOOL_FLUTTER))'; \
-	ver='$(FLUTTER_VERSION)'; \
+	ver='$(FLUTTER_VERSION)'; ref='$(FLUTTER_REF)'; \
 	if [ -x "$$fl/bin/flutter" ] && [ -d "$$fl/.git" ]; then \
-	  cur=$$(git -C "$$fl" describe --tags --exact-match 2>/dev/null || true); \
-	  if [ "$$cur" = "$$ver" ]; then echo "Flutter $$ver already at $$fl"; exit 0; fi; \
+	  cur=$$(git -C "$$fl" rev-parse HEAD); \
+	  if [ "$$cur" = "$$ref" ]; then echo "Flutter $$ver ($$ref) already at $$fl"; exit 0; fi; \
 	fi; \
-	echo "==> Bootstrapping Flutter $$ver → $$fl"; \
+	echo "==> Bootstrapping Flutter $$ver ($$ref) → $$fl"; \
 	rm -rf "$$fl"; \
-	git clone --depth 1 --branch "$$ver" '$(FLUTTER_GIT)' "$$fl"; \
+	git clone --filter=blob:none --no-checkout '$(FLUTTER_GIT)' "$$fl"; \
+	git -C "$$fl" fetch --depth 1 origin "$$ref"; \
+	git -C "$$fl" checkout --force FETCH_HEAD; \
+	test "$$(git -C "$$fl" rev-parse HEAD)" = "$$ref"; \
 	git config --global --add safe.directory "$$fl"; \
 	export FLUTTER_SUPPRESS_ANALYTICS=true CI=true; \
 	export HOME="$${HOME:-$(C_HOME)}"; \
@@ -337,7 +352,8 @@ setup-android-sdk:
 	export HOME="$${HOME:-$(C_HOME)}"; \
 	export ANDROID_USER_HOME="$$HOME/.android"; \
 	mkdir -p "$$HOME/.android" "$$sdk"; \
-	if [ -d "$$sdk/platforms/android-36" ] \
+	if [ -d "$$sdk/platforms/android-35" ] \
+	   && [ -d "$$sdk/platforms/android-36" ] \
 	   && [ -x "$$sdk/cmake/3.31.6/bin/cmake" ] \
 	   && [ -d "$$sdk/ndk/29.0.14206865" ]; then \
 	  echo "Android SDK packages already at $$sdk"; exit 0; \
@@ -345,8 +361,9 @@ setup-android-sdk:
 	echo "==> Installing Android packages into $$sdk (same set as CI)"; \
 	yes | "$$sm" --sdk_root="$$sdk" --licenses >/dev/null || true; \
 	"$$sm" --sdk_root="$$sdk" \
-	  '$(ANDROID_PLATFORM)' '$(ANDROID_BUILD_TOOLS)' \
+	  '$(ANDROID_CLIENT_PLATFORM)' '$(ANDROID_MOBILE_PLATFORM)' '$(ANDROID_BUILD_TOOLS)' \
 	  '$(ANDROID_NDK_PKG)' '$(ANDROID_CMAKE_PKG)'; \
+	test -d "$$sdk/platforms/android-35"; \
 	test -d "$$sdk/platforms/android-36"; \
 	test -x "$$sdk/cmake/3.31.6/bin/cmake"; \
 	test -d "$$sdk/ndk/29.0.14206865"; \
@@ -362,16 +379,22 @@ setup-cross:
 	    rustup target list --installed --toolchain "$$toolchain" | grep -qx "$$target" \
 	      || { echo "error: Rust target $$target missing from toolchain $$toolchain" >&2; exit 1; }; \
 	  done
-	@command -v cargo-zigbuild >/dev/null || cargo install --locked --version 0.22.3 cargo-zigbuild
+	@if ! command -v cargo-zigbuild >/dev/null 2>&1 || ! cargo-zigbuild --version | grep -Eq ' 0\.22\.3$$'; then \
+	  cargo install --locked --force --version 0.22.3 cargo-zigbuild; \
+	fi
 
-# Client Conan: prefer image/system `conan` (adguard/core-libs ships it). Fall back
+# Client Conan: use the exact version which supports the image's Clang 22.
+# The image's system Conan may be older, so fall back to the local venv when it
+# does not match.
 # to tt-client/env only when needed. That env is on a host↔Docker bind-mount, so a
 # venv created on the host has absolute shebangs under /home/... which ENOENT inside
 # /workspace — never leave a broken env/bin on PATH ahead of system conan.
 setup-client:
 	@set -e; \
+	stamp='$(C_CONAN)/.tt-client-bootstrap-complete'; \
 	use_system=0; \
-	if command -v conan >/dev/null 2>&1 && conan --version >/dev/null 2>&1; then \
+	if command -v conan >/dev/null 2>&1 \
+	   && conan --version | grep -Fqx 'Conan version 2.31.2'; then \
 	  use_system=1; \
 	fi; \
 	if [ "$$use_system" = 1 ]; then \
@@ -385,12 +408,11 @@ setup-client:
 	    fi; \
 	  fi; \
 	  echo "Using system Conan: $$(conan --version)"; \
-	  if (cd '$(CLIENT_DIR)' && conan graph info . \
-	      --profile:host='$(CLIENT_BOOTSTRAP_PROFILE)' \
-	      --profile:build='$(CLIENT_BOOTSTRAP_PROFILE)' >/dev/null 2>&1); then \
+	  if [ -f "$$stamp" ]; then \
 	    echo "Conan dependencies already bootstrapped, skipping clone/export."; \
 	  else \
 	    cd '$(CLIENT_DIR)' && python3 scripts/bootstrap_conan_deps.py; \
+	    touch "$$stamp"; \
 	  fi; \
 	  exit 0; \
 	fi; \
@@ -419,27 +441,34 @@ setup-client:
 	  '$(CLIENT_ENV)/bin/python3' -c 'import pip' \
 	    || { echo "error: venv still has no pip after recreate" >&2; exit 1; }; \
 	fi; \
-	'$(CLIENT_PYTHON)' -m pip install --disable-pip-version-check --upgrade pip conan; \
+	'$(CLIENT_PYTHON)' -m pip install --disable-pip-version-check --upgrade pip 'conan==2.31.2'; \
 	if [ -f '$(CLIENT_DIR)/requirements.txt' ]; then \
 	  '$(CLIENT_PYTHON)' -m pip install --disable-pip-version-check -r '$(CLIENT_DIR)/requirements.txt'; \
 	fi; \
 	if [ ! -x '$(CLIENT_CONAN)' ] || ! '$(CLIENT_CONAN)' --version >/dev/null 2>&1; then \
-	  '$(CLIENT_PYTHON)' -m pip install --disable-pip-version-check --force-reinstall 'conan>=2.0.5'; \
+	  '$(CLIENT_PYTHON)' -m pip install --disable-pip-version-check --force-reinstall 'conan==2.31.2'; \
 	fi; \
 	'$(CLIENT_CONAN)' --version >/dev/null \
 	  || { echo "error: conan still not runnable in $(CLIENT_ENV)" >&2; exit 1; }; \
-	if (cd '$(CLIENT_DIR)' && PATH="$(CLIENT_ENV)/bin:$$PATH" conan graph info . \
-	    --profile:host='$(CLIENT_BOOTSTRAP_PROFILE)' \
-	    --profile:build='$(CLIENT_BOOTSTRAP_PROFILE)' >/dev/null 2>&1); then \
+	if [ -f "$$stamp" ]; then \
 	  echo "Conan dependencies already bootstrapped, skipping clone/export."; \
 	else \
 	  cd '$(CLIENT_DIR)' && PATH="$(CLIENT_ENV)/bin:$$PATH" '$(CLIENT_PYTHON)' scripts/bootstrap_conan_deps.py; \
+	  touch "$$stamp"; \
 	fi
 
 setup-android: setup-android-sdk setup-client
-	@rustup target add aarch64-linux-android armv7-linux-androideabi \
-	  x86_64-linux-android i686-linux-android 2>/dev/null || true
-	@command -v cargo-ndk >/dev/null || cargo install --locked cargo-ndk
+	@toolchain=$$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' '$(CLIENT_DIR)/rust-toolchain.toml' | head -1); \
+	  test -n "$$toolchain" || { echo 'error: cannot read client Rust toolchain' >&2; exit 1; }; \
+	  rustup toolchain install "$$toolchain" --profile minimal; \
+	  for target in aarch64-linux-android armv7-linux-androideabi x86_64-linux-android i686-linux-android; do \
+	    rustup target add --toolchain "$$toolchain" "$$target"; \
+	    rustup target list --installed --toolchain "$$toolchain" | grep -qx "$$target" \
+	      || { echo "error: Rust target $$target missing from toolchain $$toolchain" >&2; exit 1; }; \
+	  done
+	@if ! command -v cargo-ndk >/dev/null 2>&1 || ! cargo-ndk --version | grep -Eq ' 3\.5\.4$$'; then \
+	  cargo install --locked --force --version 3.5.4 cargo-ndk; \
+	fi
 
 # ---------------------------------------------------------------------------
 # Build graph (inside container)
@@ -457,9 +486,11 @@ build-server-native: check-cross setup-cross
 	  ln -sf '$(CURDIR)/scripts/zig-compiler' "$$zig_dir/zig-cc"; \
 	  ln -sf '$(CURDIR)/scripts/zig-compiler' "$$zig_dir/zig-cxx"; \
 	  output="$(OUT_DIR)/server/tt-server-$(SERVER_VERSION)-linux-$$arch"; \
-	  (cd '$(SERVER_DIR)' && env CC="$$zig_dir/zig-cc" CXX="$$zig_dir/zig-cxx" \
-	    RUSTFLAGS='--remap-path-prefix=/__w/tt-server/tt-server=/tt-server --remap-path-prefix=/workspace/tt-server=/tt-server' \
+	  source_epoch=$$(git -C '$(SERVER_DIR)' show -s --format=%ct HEAD); \
+	  (cd '$(SERVER_DIR)' && env SOURCE_DATE_EPOCH="$$source_epoch" CC="$$zig_dir/zig-cc" CXX="$$zig_dir/zig-cxx" \
+	    RUSTFLAGS="$$RUSTFLAGS --remap-path-prefix=/__w/tt-server/tt-server=/tt-server" \
 	    scripts/ci/build-musl-target.sh "$$arch" '$(SERVER_VERSION)' "$$output"); \
+	  python3 '$(CURDIR)/scripts/normalize-conan-paths.py' "$$output"; \
 	done
 
 build-client-native: check-cross setup-cross setup-client
@@ -477,22 +508,44 @@ build-client-native: check-cross setup-cross setup-client
 	  build_dir="cmake-build-musl-cross-$$arch-relwithdebinfo"; \
 	  rm -f '$(CLIENT_DIR)/'"$$build_dir"/.tt-configured \
 	    '$(CLIENT_DIR)/'"$$build_dir"/CMakeCache.txt; \
-	  (cd '$(CLIENT_DIR)' && PATH="$$client_path" TT_CLIENT_VERSION='$(CLIENT_VERSION)' SKIP_BOOTSTRAP=1 \
+	  source_epoch=$$(git -C '$(CLIENT_DIR)' show -s --format=%ct HEAD); \
+	  (cd '$(CLIENT_DIR)' && PATH="$$client_path" SOURCE_DATE_EPOCH="$$source_epoch" TT_CLIENT_VERSION='$(CLIENT_VERSION)' SKIP_BOOTSTRAP=1 \
 	    $(MAKE) PRESET="musl-cross-""$$arch""-relwithdebinfo" BUILD_DIR="$$build_dir" build_trusttunnel_client); \
 	  input="$(CLIENT_DIR)/$$build_dir/trusttunnel/trusttunnel_client"; \
 	  output="$(OUT_DIR)/client/tt-client-$(CLIENT_VERSION)-linux-$$arch"; \
-	  llvm-strip -o "$$output" "$$input"; chmod 755 "$$output"; \
+	  llvm-strip -o "$$output" "$$input"; \
+	  python3 '$(CURDIR)/scripts/normalize-conan-paths.py' "$$output"; chmod 755 "$$output"; \
 	done
 	$(MAKE) build-android-native
 
 build-android-native: setup-android
 	@mkdir -p '$(MOBILE_DIR)/third_party/tt-client-maven'
+	# Docker builds reset Conan on every invocation; CMake's Android intermediates embed
+	# absolute Conan package paths, so never reuse them across invocations.
+	@rm -rf '$(CLIENT_DIR)/platform/android/lib/.cxx' \
+	  '$(CLIENT_DIR)/platform/android/lib/build' \
+	  '$(CLIENT_DIR)/platform/android/build'
 	@rm -f '$(CLIENT_DIR)/platform/android/local.properties'
 	@printf 'sdk.dir=%s\ncmake.dir=%s\n' '$(ANDROID_SDK_ROOT)' '$(ANDROID_SDK_ROOT)/cmake/3.31.6' \
 	  > '$(CLIENT_DIR)/platform/android/local.properties'
-	cd '$(CLIENT_DIR)/platform/android' && PATH="$(CLIENT_ENV)/bin:$$PATH" \
-	  TT_CLIENT_VERSION='$(CLIENT_VERSION)' \
-	  ./gradlew :lib:publishReleasePublicationToTtClientMavenRepository --no-daemon
+	@source_epoch=$$(git -C '$(CLIENT_DIR)' show -s --format=%ct HEAD); \
+	  for attempt in 1 2 3; do \
+	    if (cd '$(CLIENT_DIR)/platform/android' && PATH="$(CLIENT_ENV)/bin:$$PATH" \
+	      SOURCE_DATE_EPOCH="$$source_epoch" TT_CLIENT_VERSION='$(CLIENT_VERSION)' \
+	      ./gradlew :lib:publishReleasePublicationToTtClientMavenRepository --no-daemon); then \
+	      break; \
+	    fi; \
+	    if [ "$$attempt" -eq 3 ]; then exit 1; fi; \
+	    echo "WARN: Android AAR publication failed; retrying ($$attempt/3)" >&2; \
+	  done
+	# Exact-version consumers do not need mutable Maven latest/release metadata.
+	find '$(CLIENT_DIR)/platform/android/lib/build/maven-repo' \
+	  \( -name maven-metadata.xml -o -name maven-metadata.xml.sha1 -o -name maven-metadata.xml.md5 \
+	     -o -name maven-metadata.xml.sha256 -o -name maven-metadata.xml.sha512 \) -delete
+	find '$(CLIENT_DIR)/platform/android/lib/build/maven-repo' -type f -name '*.so' \
+	  -exec python3 '$(CURDIR)/scripts/normalize-conan-paths.py' {} +
+	find '$(CLIENT_DIR)/platform/android/lib/build/maven-repo' -type f -name '*.aar' \
+	  -exec python3 '$(CURDIR)/scripts/normalize-conan-paths.py' {} +
 	rm -rf '$(MOBILE_DIR)/third_party/tt-client-maven'/*
 	cp -a '$(CLIENT_DIR)/platform/android/lib/build/maven-repo/.' \
 	  '$(MOBILE_DIR)/third_party/tt-client-maven/'
@@ -551,14 +604,23 @@ build-mobile-native: setup-flutter
 	cd '$(MOBILE_DIR)'; \
 	$(MAKE) init; \
 	test -f .dart_tool/package_config.json; \
-	ORG_GRADLE_PROJECT_ttClientVersion='$(CLIENT_VERSION)' \
-	ORG_GRADLE_PROJECT_signingConfigKeyStorePath="$$ORG_GRADLE_PROJECT_signingConfigKeyStorePath" \
-	ORG_GRADLE_PROJECT_signingConfigKeyAlias="$$ORG_GRADLE_PROJECT_signingConfigKeyAlias" \
-	ORG_GRADLE_PROJECT_signingConfigKeyPassword="$$ORG_GRADLE_PROJECT_signingConfigKeyPassword" \
-	ORG_GRADLE_PROJECT_signingConfigKeyStorePassword="$$ORG_GRADLE_PROJECT_signingConfigKeyStorePassword" \
-	'$(FLUTTER)' --suppress-analytics build apk --release --split-per-abi \
-	  --build-name='$(MOBILE_VERSION)' --build-number='$(MOBILE_VERSION_CODE)' \
-	  --dart-define="TT_CLIENT_VERSION=$(CLIENT_VERSION)"; \
+	built=0; \
+	for attempt in 1 2 3; do \
+	  if ORG_GRADLE_PROJECT_ttClientVersion='$(CLIENT_VERSION)' \
+	    ORG_GRADLE_PROJECT_signingConfigKeyStorePath="$$ORG_GRADLE_PROJECT_signingConfigKeyStorePath" \
+	    ORG_GRADLE_PROJECT_signingConfigKeyAlias="$$ORG_GRADLE_PROJECT_signingConfigKeyAlias" \
+	    ORG_GRADLE_PROJECT_signingConfigKeyPassword="$$ORG_GRADLE_PROJECT_signingConfigKeyPassword" \
+	    ORG_GRADLE_PROJECT_signingConfigKeyStorePassword="$$ORG_GRADLE_PROJECT_signingConfigKeyStorePassword" \
+	    '$(FLUTTER)' --suppress-analytics build apk --release --split-per-abi \
+	      --build-name='$(MOBILE_VERSION)' --build-number='$(MOBILE_VERSION_CODE)' \
+	      --dart-define="TT_CLIENT_VERSION=$(CLIENT_VERSION)"; then \
+	    built=1; break; \
+	  fi; \
+	  if [ "$$attempt" -lt 3 ]; then \
+	    echo "==> mobile build failed; retrying transient dependency download ($$attempt/3)" >&2; \
+	  fi; \
+	done; \
+	test "$$built" = 1; \
 	mkdir -p '$(OUT_DIR)/mobile'; \
 	out='$(MOBILE_DIR)/build/app/outputs/flutter-apk'; \
 	for abi in arm64-v8a armeabi-v7a x86_64; do \

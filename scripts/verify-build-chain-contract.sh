@@ -8,12 +8,15 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 
 grep -q 'BUILD_IMAGE ?= adguard/core-libs@sha256:26f7e1c6c19b1e2c90a8938e6c763469787fbaeff94f8c5a887b947aa8858f5e' "$MF" || fail "BUILD_IMAGE digest pin"
 grep -q 'FLUTTER_VERSION ?= 3.44.8' "$MF" || fail "FLUTTER_VERSION pin"
+grep -q 'FLUTTER_REF ?= 058e0af2c2b57e369d905a03ac9748b0ebf543c6' "$MF" || fail "FLUTTER_REF pin"
+grep -q 'platforms;android-35' "$MF" || fail "android-35"
 grep -q 'platforms;android-36' "$MF" || fail "android-36"
 grep -q 'build-tools;35.0.0' "$MF" || fail "build-tools"
 grep -q 'ndk;29.0.14206865' "$MF" || fail "ndk"
 grep -q 'cmake;3.31.6' "$MF" || fail "cmake"
 grep -q 'TOOL_FLUTTER := \$(OUT_DIR)/flutter' "$MF" || fail "flutter under OUT_DIR"
 grep -q 'TOOL_ANDROID_SDK := \$(OUT_DIR)/android-sdk' "$MF" || fail "android-sdk under OUT_DIR"
+grep -q "Conan version 2.31.2" "$MF" || fail "Conan exact pin"
 
 # No host personal toolchain bind-mounts (comments OK; env -e FLUTTER_ROOT=… OK)
 if grep -nE -- '^\s+-v .*(/flutter|/Android/Sdk|FLUTTER_ROOT)' "$MF" \
