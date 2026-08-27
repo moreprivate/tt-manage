@@ -1610,11 +1610,14 @@ service_init_cmd() {
 # Stop procd service and ensure no stray process remains (same end state as a
 # successful /etc/init.d/moreprivate_tt_client stop). Success = process gone, not init rc.
 service_stop() {
-  local i=0
+  local i=0 pids="" process_status=0
   if [ ! -x "$INIT" ]; then
-    client_running || return 0
-    echo "error: cannot stop running client: init script missing: $INIT" >&2
-    return 1
+    pids="$(client_pids)" || process_status=$?
+    case "$process_status" in
+      0) echo "error: cannot stop running client: init script missing: $INIT" >&2; return 1 ;;
+      1) return 0 ;;
+      *) echo "error: cannot verify client process state (status ${process_status})" >&2; return 1 ;;
+    esac
   fi
   # Filter procd's intermittent "Command failed: Not found" (ubus instance already gone).
   service_init_cmd stop || true
@@ -1625,27 +1628,34 @@ service_stop() {
   done
   if client_running; then
     log "client still running after stop — sending TERM"
-    pids="$(pidof tt-client 2>/dev/null || true)"
-    if [ -n "$pids" ]; then
-      # shellcheck disable=SC2086
-      kill -TERM $pids 2>/dev/null || true
-    fi
+    pids="$(client_pids)" || process_status=$?
+    case "$process_status" in
+      0) # shellcheck disable=SC2086
+         kill -TERM $pids 2>/dev/null || true ;;
+      1) : ;; # Exited between the running check and enumeration.
+      *) echo "error: cannot enumerate client processes (status ${process_status})" >&2; return 1 ;;
+    esac
     sleep 2
   fi
   if client_running; then
     log "client still running after TERM — sending KILL"
-    pids="$(pidof tt-client 2>/dev/null || true)"
-    if [ -n "$pids" ]; then
-      # shellcheck disable=SC2086
-      kill -KILL $pids 2>/dev/null || true
-    fi
+    process_status=0
+    pids="$(client_pids)" || process_status=$?
+    case "$process_status" in
+      0) # shellcheck disable=SC2086
+         kill -KILL $pids 2>/dev/null || true ;;
+      1) : ;; # Exited between the running check and enumeration.
+      *) echo "error: cannot enumerate client processes (status ${process_status})" >&2; return 1 ;;
+    esac
     sleep 1
   fi
-  if client_running; then
-    echo "error: tt-client did not stop" >&2
-    return 1
-  fi
-  return 0
+  process_status=0
+  pids="$(client_pids)" || process_status=$?
+  case "$process_status" in
+    0) echo "error: tt-client did not stop (pid $(printf '%s' "$pids" | tr '\n' ' '))" >&2; return 1 ;;
+    1) return 0 ;;
+    *) echo "error: cannot verify that tt-client stopped (status ${process_status})" >&2; return 1 ;;
+  esac
 }
 
 service_start() {
@@ -1848,7 +1858,7 @@ install_binary() {
 }
 
 client_running() {
-  [ -n "$(client_pids)" ]
+  client_pids >/dev/null 2>&1
 }
 
 # Count ESTAB sockets to VPS:port. $1=tcp|udp  $2=vps_ip  $3=port → stdout count
@@ -2269,20 +2279,25 @@ status_report_transport() {
 }
 
 client_pids() {
-  if command -v pidof >/dev/null 2>&1; then
-    pids=""
-    target=""
-    if [ -L "$BIN" ]; then
-      target="$(basename "$(readlink -f "$BIN" 2>/dev/null || true)")"
-    fi
-    if [ -n "$target" ]; then
-      pids="$pids $(pidof "$target" 2>/dev/null || true)"
-    fi
-    pids="$pids $(pidof tt-client 2>/dev/null || true)"
-    printf '%s\n' $pids | awk '{ for (i = 1; i <= NF; i++) if (!seen[$i]++) print $i }'
-  elif command -v pgrep >/dev/null 2>&1; then
-    pgrep -f '^/usr/bin/tt-client(-[^[:space:]]+)?([[:space:]]|$)' 2>/dev/null || true
-  fi
+  local proc_path="" process_exe="" found=1
+
+  # BusyBox pgrep/pidof use 0 for a match and 1 for no match, but do not
+  # provide procps-ng's distinct 2/3 error statuses. Inspect /proc directly
+  # so a static, exact executable-path check cannot turn a tool error into a
+  # false "not running" result.
+  [ -d /proc/1 ] || return 127
+  for proc_path in /proc/[0-9]*; do
+    [ -d "$proc_path" ] || continue
+    process_exe="$(readlink "$proc_path/exe" 2>/dev/null)" || continue
+    process_exe="${process_exe% (deleted)}"
+    case "$process_exe" in
+      "$BIN"|/usr/bin/tt-client-*-linux-*)
+        printf '%s\n' "${proc_path##*/}"
+        found=0
+        ;;
+    esac
+  done
+  return "$found"
 }
 
 client_single_pid() {
@@ -3425,6 +3440,7 @@ cmd_rollback() {
 cmd_status() {
   local vps_ip="" vps_port="" wan_dev s wan_masq=0 current="" previous=""
   local direct_ip="" dns_ip="" probe="" hard_verified=0 current_wan_dns=""
+  local process_pids="" process_status=0
   local _vps_marked="" _vps_unmarked=""
   local dns_actual="" dns_expected="" dns_tunnel="" dns_direct="" dns_domains="" dom srv
   local tt_up="" tt_l3="" lan_cfg=0 lan_jump=0 lan_accept=0 ip_mark_ok=0
@@ -3483,11 +3499,12 @@ cmd_status() {
   else
     _st_fail "init script missing"
   fi
-  if client_running; then
-    _st_ok "process running"
-  else
-    _st_warn "process not running"
-  fi
+  process_pids="$(client_pids)" || process_status=$?
+  case "$process_status" in
+    0) _st_ok "process running (pid $(printf '%s' "$process_pids" | tr '\n' ' '))" ;;
+    1) _st_warn "process not running" ;;
+    *) _st_fail "process check failed (status ${process_status})" ;;
+  esac
   tt_log_tail 5 | sed 's/^/  | /' || true
   echo
   echo "[transport]"
@@ -3792,7 +3809,8 @@ cmd_purge() {
   # MUST keep/ensure direct lan→wan (any shared LAN→WAN forwarding).
   # MUST NOT touch shared host policy (DNS, rebind, wan6/dhcpv6 UCI) —
   # even if install modified them — only REPORT for user review.
-  local left=0 has_lan_wan s vps_ip=""
+  local left=0 has_lan_wan s vps_ip="" process_pids="" process_status=0
+  local check_output="" check_status=0 nft_ruleset="" network_dump="" firewall_dump=""
 
   log "purge TT product only (direct internet; shared state reported untouched)"
   vps_ip="$(parse_vps_ip "$CLIENT_TOML" 2>/dev/null || true)"
@@ -3897,8 +3915,11 @@ cmd_purge() {
       echo "  ok    gone $f"
     fi
   done
-  if find /usr/bin -maxdepth 1 -type f -name 'tt-client-*-linux-*' \
-    | grep -q .; then
+  check_output=""
+  for s in /usr/bin/tt-client-*-linux-*; do
+    [ -e "$s" ] && check_output="${check_output}${check_output:+ }${s}"
+  done
+  if [ -n "$check_output" ]; then
     echo "  FAIL  versioned client binaries remain"; left=$((left + 1))
   else
     echo "  ok    versioned client binaries gone"
@@ -3913,57 +3934,70 @@ cmd_purge() {
   else
     echo "  ok    sysctl drop-in gone"
   fi
-  if ip rule show 2>/dev/null | grep -q "${MARK_PRIO}:.*${MARK}"; then
+  check_status=0
+  check_output="$(ip rule show 2>/dev/null)" || check_status=$?
+  if [ "$check_status" -ne 0 ]; then
+    echo "  FAIL  cannot list IP rules (status ${check_status})"; left=$((left + 1))
+  elif printf '%s\n' "$check_output" | grep -q "${MARK_PRIO}:.*${MARK}"; then
     echo "  FAIL  mark rule prio ${MARK_PRIO} still present"; left=$((left + 1))
   else
     echo "  ok    mark rule gone"
   fi
-  if nft list table inet moreprivate_tt_client >/dev/null 2>&1; then
+  check_status=0
+  nft_ruleset="$(nft list ruleset 2>/dev/null)" || check_status=$?
+  if [ "$check_status" -ne 0 ]; then
+    echo "  FAIL  cannot list nft ruleset (status ${check_status})"; left=$((left + 1))
+  elif printf '%s\n' "$nft_ruleset" | grep -qE '^table inet moreprivate_tt_client([[:space:]]|$)'; then
     echo "  FAIL  independent nft kill-switch table remains"; left=$((left + 1))
   else
-    echo "  ok    independent nft kill-switch table gone"
+    echo "  ok    independent nft kill-switch table and direct sets gone"
   fi
-  if uci -q get network.moreprivate_tt_client >/dev/null 2>&1; then
+  check_status=0
+  network_dump="$(uci -q show network 2>/dev/null)" || check_status=$?
+  if [ "$check_status" -ne 0 ]; then
+    echo "  FAIL  cannot read UCI network state (status ${check_status})"; left=$((left + 1))
+  elif printf '%s\n' "$network_dump" | grep -q '^network\.moreprivate_tt_client='; then
     echo "  FAIL  network.moreprivate_tt_client still set"; left=$((left + 1))
   else
     echo "  ok    network.moreprivate_tt_client gone"
   fi
-  if uci -q get firewall.moreprivate_tt_client >/dev/null 2>&1 \
-    || uci -q get firewall.moreprivate_tt_client_icmp_reply >/dev/null 2>&1 \
-    || uci -q get firewall.lan_moreprivate_tt_client >/dev/null 2>&1 \
-    || uci -q get firewall.moreprivate_tt_client_lan_wan >/dev/null 2>&1; then
+  check_status=0
+  firewall_dump="$(uci -q show firewall 2>/dev/null)" || check_status=$?
+  if [ "$check_status" -ne 0 ]; then
+    echo "  FAIL  cannot read UCI firewall state (status ${check_status})"; left=$((left + 1))
+  elif printf '%s\n' "$firewall_dump" \
+    | grep -qE '^firewall\.(moreprivate_tt_client|moreprivate_tt_client_icmp_reply|lan_moreprivate_tt_client|moreprivate_tt_client_lan_wan)='; then
     echo "  FAIL  TT firewall zone/forward still set"; left=$((left + 1))
   else
     echo "  ok    TT firewall zone/forward gone"
   fi
-  if nft list set inet moreprivate_tt_client tt_direct4 >/dev/null 2>&1; then
-    echo "  FAIL  nft tt_direct4 still loaded (PBR not cleared?)"; left=$((left + 1))
-  else
-    echo "  ok    tt_direct4 not loaded"
-  fi
-  if nft list set inet moreprivate_tt_client tt_direct_dns4 >/dev/null 2>&1; then
-    echo "  FAIL  nft tt_direct_dns4 still loaded (PBR not cleared?)"; left=$((left + 1))
-  else
-    echo "  ok    tt_direct_dns4 not loaded"
-  fi
   has_lan_wan=0
-  for s in $(uci show firewall 2>/dev/null | sed -n 's/^\(firewall\.[^=]*\)=forwarding$/\1/p'); do
-    [ "$(uci -q get "$s.src" 2>/dev/null)" = "lan" ] || continue
-    [ "$(uci -q get "$s.dest" 2>/dev/null)" = "wan" ] || continue
-    has_lan_wan=1
-    break
-  done
-  if [ "$has_lan_wan" = 0 ]; then
-    echo "  FAIL  no lan→wan forward (LAN may have no internet)"; left=$((left + 1))
+  if [ "$check_status" -ne 0 ]; then
+    echo "  info  lan→wan forward not checked because UCI firewall query failed"
   else
-    echo "  ok    lan→wan forward present (direct)"
+    for s in $(printf '%s\n' "$firewall_dump" | sed -n 's/^\(firewall\.[^=]*\)=forwarding$/\1/p'); do
+      [ "$(uci -q get "$s.src" 2>/dev/null)" = "lan" ] || continue
+      [ "$(uci -q get "$s.dest" 2>/dev/null)" = "wan" ] || continue
+      has_lan_wan=1
+      break
+    done
+    if [ "$has_lan_wan" = 0 ]; then
+      echo "  FAIL  no lan→wan forward (LAN may have no internet)"; left=$((left + 1))
+    else
+      echo "  ok    lan→wan forward present (direct)"
+    fi
   fi
-  if client_running; then
-    echo "  FAIL  tt-client still running"; left=$((left + 1))
-  else
-    echo "  ok    no client process"
-  fi
-  if ip link show tun0 >/dev/null 2>&1; then
+  process_pids="$(client_pids)" || process_status=$?
+  case "$process_status" in
+    0) echo "  FAIL  tt-client still running (pid $(printf '%s' "$process_pids" | tr '\n' ' '))"; left=$((left + 1)) ;;
+    1) echo "  ok    no client process" ;;
+    *) echo "  FAIL  process check failed (status ${process_status})"; left=$((left + 1)) ;;
+  esac
+  check_status=0
+  check_output="$(ip -o link show 2>/dev/null)" || check_status=$?
+  if [ "$check_status" -ne 0 ]; then
+    echo "  FAIL  cannot list network links (status ${check_status})"; left=$((left + 1))
+  elif printf '%s\n' "$check_output" | grep -qE '^[0-9]+:[[:space:]]+tun0:'; then
     echo "  FAIL  tun0 still exists"; left=$((left + 1))
   else
     echo "  ok    no tun0"

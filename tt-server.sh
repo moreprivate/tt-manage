@@ -112,6 +112,24 @@ binary_link_path() {
   printf '%s/%s' "${INSTALL_DIR}" "${BIN_NAME}"
 }
 
+server_pids() {
+  local proc_path process_exe found=1
+
+  [[ -d /proc/1 ]] || return 127
+  for proc_path in /proc/[0-9]*; do
+    [[ -d "$proc_path" ]] || continue
+    process_exe="$(readlink "$proc_path/exe" 2>/dev/null)" || continue
+    process_exe="${process_exe% (deleted)}"
+    case "$process_exe" in
+      "${INSTALL_DIR}/${BIN_NAME}"|"${INSTALL_DIR}/${BIN_NAME}-"*-linux-*)
+        printf '%s\n' "${proc_path##*/}"
+        found=0
+        ;;
+    esac
+  done
+  return "$found"
+}
+
 binary_resolve_link() {
   local link target
   link="$(binary_link_path)"
@@ -1658,7 +1676,8 @@ cmd_purge() {
   #   install: user+dirs → binary+configs → certs/hook → unit+start → ufw
   #   purge:   stop unit → unit → hook → install dir → user
   # Intentionally NOT reversed (reported under KEPT): apt pkgs, snap/certbot, LE live, ufw.
-  local left=0 ufw_line certbot_path
+  local left=0 ufw_line certbot_path process_pids process_status
+  local service_state systemctl_status
 
   log "purge ${SERVICE_NAME} (reverse install)"
 
@@ -1736,18 +1755,25 @@ cmd_purge() {
   else
     echo "  ok    user ${SERVICE_USER} gone"
   fi
-  if systemctl is-active --quiet "${SERVICE_NAME}.service" 2>/dev/null; then
-    echo "  FAIL  service still active"; left=$((left + 1))
-  else
-    echo "  ok    service not active"
-  fi
-  if command -v pgrep >/dev/null 2>&1 && pgrep -f "${BIN_NAME}" >/dev/null 2>&1; then
-    echo "  FAIL  process still running: ${BIN_NAME}"; left=$((left + 1))
-  elif command -v pgrep >/dev/null 2>&1; then
-    echo "  ok    no ${BIN_NAME} process"
-  else
-    echo "  info  pgrep not available — skip process check"
-  fi
+  service_state=""
+  systemctl_status=0
+  service_state="$(systemctl is-active "${SERVICE_NAME}.service" 2>/dev/null)" || systemctl_status=$?
+  case "$service_state" in
+    active|activating|reloading|deactivating)
+      echo "  FAIL  service still ${service_state}"; left=$((left + 1)) ;;
+    inactive|failed|unknown)
+      echo "  ok    service not active (${service_state})" ;;
+    *)
+      echo "  FAIL  cannot determine service state (status ${systemctl_status})"; left=$((left + 1)) ;;
+  esac
+  process_pids=""
+  process_status=0
+  process_pids="$(server_pids)" || process_status=$?
+  case "$process_status" in
+    0) echo "  FAIL  process still running: ${BIN_NAME} (pid ${process_pids//$'\n'/ })"; left=$((left + 1)) ;;
+    1) echo "  ok    no ${BIN_NAME} process" ;;
+    *) echo "  FAIL  process check failed (status ${process_status})"; left=$((left + 1)) ;;
+  esac
   echo
   if [[ "$left" -ne 0 ]]; then
     echo "status: purge incomplete (${left} leftover FAIL) — fix manually then re-run purge"

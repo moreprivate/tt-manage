@@ -175,8 +175,23 @@ save_meta() {
   chmod 600 "$tmp"; mv -f "$tmp" "$RELEASE_META"
 }
 
-client_pids() { pgrep -f '^/usr/local/bin/tt-client([[:space:]]|$)' 2>/dev/null || true; }
-client_running() { [ -n "$(client_pids)" ]; }
+client_pids() {
+  local proc_path="" process_exe="" found=1
+
+  [ -d /proc/1 ] || return 127
+  for proc_path in /proc/[0-9]*; do
+    [ -d "$proc_path" ] || continue
+    process_exe="$(readlink "$proc_path/exe" 2>/dev/null)" || continue
+    process_exe="${process_exe% (deleted)}"
+    case "$process_exe" in
+      "$BIN"|/usr/local/bin/tt-client-*-linux-*)
+        printf '%s\n' "${proc_path##*/}"
+        found=0
+        ;;
+    esac
+  done
+  return "$found"
+}
 
 write_client_config() {
   local src="$1" tmp="${CLIENT_TOML}.new.$$" protocol=""
@@ -398,7 +413,16 @@ dnsmasq_start() {
   fi
 }
 dnsmasq_stop() { systemctl stop "$DNSMASQ_SERVICE_NAME.service" >/dev/null 2>&1 || true; }
-service_stop() { systemctl stop "$SERVICE_NAME.service" >/dev/null 2>&1 || true; }
+service_stop() {
+  local pids="" process_status=0
+  systemctl stop "$SERVICE_NAME.service" >/dev/null 2>&1 || true
+  pids="$(client_pids)" || process_status=$?
+  case "$process_status" in
+    0) die "tt-client did not stop (pid $(printf '%s' "$pids" | tr '\n' ' '))" ;;
+    1) return 0 ;;
+    *) die "cannot verify that tt-client stopped (process check status ${process_status})" ;;
+  esac
+}
 service_restart() { systemctl restart "$SERVICE_NAME.service"; }
 
 upgrade_rollback() {
@@ -456,6 +480,7 @@ cmd_rollback() {
 }
 cmd_status() {
   local vps="" port="" conf="" tcp_n=0 udp_n=0 active=0
+  local enabled_state="" enabled_status=0 active_state="" active_status=0
   echo "=== MorePrivate tt-client Linux status ==="
   [ -L "$BIN" ] && echo "  binary [*] $(readlink -f "$BIN")" || echo "  FAIL binary missing"
   [ -x "$BIN" ] && echo "  product: $($BIN --version 2>/dev/null | head -1 || echo unknown)"
@@ -469,13 +494,21 @@ cmd_status() {
   else
     echo "  FAIL config missing"
   fi
-  systemctl is-enabled "$SERVICE_NAME.service" 2>/dev/null && echo "  ok    enabled" || echo "  warn  disabled"
-  if systemctl is-active "$SERVICE_NAME.service" 2>/dev/null; then
-    echo "  ok    active"
-    active=1
-  else
-    echo "  FAIL inactive"
-  fi
+  enabled_state="$(systemctl is-enabled "$SERVICE_NAME.service" 2>/dev/null)" || enabled_status=$?
+  case "$enabled_state" in
+    enabled|enabled-runtime|linked|linked-runtime|alias) echo "  ok    enabled (${enabled_state})" ;;
+    disabled|masked|masked-runtime|static|indirect|generated|transient) echo "  warn  not enabled (${enabled_state})" ;;
+    not-found) echo "  FAIL unit not found" ;;
+    *) echo "  FAIL cannot determine enablement (status ${enabled_status})" ;;
+  esac
+  active_state="$(systemctl is-active "$SERVICE_NAME.service" 2>/dev/null)" || active_status=$?
+  case "$active_state" in
+    active) echo "  ok    active"; active=1 ;;
+    activating|reloading) echo "  warn  ${active_state}" ;;
+    inactive|failed|deactivating) echo "  FAIL ${active_state}" ;;
+    unknown) echo "  FAIL unit state unknown" ;;
+    *) echo "  FAIL cannot determine activity (status ${active_status})" ;;
+  esac
   ip rule show | grep -q "$MARK_PRIO" && echo "  ok    endpoint mark rule" || echo "  FAIL endpoint mark rule"
   ip route show table "$TUN_TABLE" 2>/dev/null | grep -q tun0 && echo "  ok    default route via tun0" || echo "  FAIL tunnel default route"
   if [ "$active" = 1 ] && [ -n "$vps" ] && [ -n "$port" ] && command -v ss >/dev/null 2>&1; then
