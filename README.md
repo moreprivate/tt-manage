@@ -35,7 +35,9 @@ connection count in the TOML when needed; `0` retains the client library
 fallback of 8. Override the transport with
 `--upstream-protocol auto|http2|http3`.
 The endpoint supports H2 and H3. A server with no users is a valid deny-all
-state.
+state. `add-user` hot-reloads credentials without disrupting connected users;
+`del-user` immediately drops only the deleted user's active tunnels. Binary
+upgrades and certificate deployments still restart the endpoint deliberately.
 
 ### OpenWrt
 

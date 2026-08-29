@@ -4,7 +4,7 @@
 # Data lifecycle and copy-paste flows: $0 help
 set -euo pipefail
 
-VERSION_SCRIPT="0.1.28"
+VERSION_SCRIPT="0.1.30"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATES_SERVER="${SCRIPT_DIR}/templates/server"
 
@@ -34,6 +34,8 @@ CLIENTS_DIR="${INSTALL_DIR}/clients"
 CLIENT_PROTOCOL_FILE="${INSTALL_DIR}/client-protocol"
 ENDPOINT_IP_FILE="${INSTALL_DIR}/endpoint.ip"
 RELEASE_META="${INSTALL_DIR}/release.env"
+RELOAD_STATUS="/run/${SERVICE_NAME}/reload.status"
+MANAGER_LOCK="/run/lock/${SERVICE_NAME}.lock"
 LE_LIVE="/etc/letsencrypt/live/${CERT_LIVE_NAME}"
 LE_HOOK="/etc/letsencrypt/renewal-hooks/deploy/moreprivate-tt-server-reload"
 
@@ -49,6 +51,13 @@ _BIN_TX_SERVICE_WAS_ACTIVE=0
 die() { echo "error: $*" >&2; exit 1; }
 log() { echo "==> $*"; }
 need_root() { [[ "$(id -u)" -eq 0 ]] || die "run as root"; }
+
+acquire_manager_lock() {
+  need_cmds flock install
+  install -d -m 0755 /run/lock
+  exec 9>"${MANAGER_LOCK}"
+  flock -x 9 || die "cannot acquire manager lock ${MANAGER_LOCK}"
+}
 
 # --- small utils ---
 need_cmds() {
@@ -339,10 +348,10 @@ DESCRIPTION
         replaces them.
 
     upgrade
-        Binary only: latest published release by default, or --version TAG,
-        or --binary PATH. Does not touch configs, credentials, clients, certs,
-        firewall, unit contents, or enablement. If the endpoint is active,
-        restart and verify it; if inactive, leave it inactive.
+        Latest published release by default, or --version TAG, or --binary PATH.
+        Migrates the systemd unit when required, but does not touch configs,
+        credentials, clients, certificates, firewall, or enablement. If the
+        endpoint is active, restart and verify it; if inactive, leave it inactive.
 
     add-user <name>
         Required before a client can authenticate (and for each new device).
@@ -350,10 +359,13 @@ DESCRIPTION
         Writes credentials.toml [[client]] + ${CLIENTS_DIR}/<name>.toml (0600).
         Generated clients use the install-time protocol (default http2;
         http_connections_num=${HTTP_CONNECTIONS_NUM}; 0 = client library default of 8).
-        Starts/restarts the endpoint. Copy the .toml to clients.
+        Hot-reloads credentials without restarting the endpoint. Existing
+        users keep their current tunnels. Copy the .toml to clients.
 
     del-user <name>
-        Remove credentials entry and ${CLIENTS_DIR}/<name>.toml.
+        Remove credentials entry and ${CLIENTS_DIR}/<name>.toml, reject new
+        authentication, and terminate that user's active tunnels. Other users
+        remain connected.
 
     disable / enable
         stop+disable / enable+start systemd unit; keep all files.
@@ -666,7 +678,9 @@ Type=simple
 User=${SERVICE_USER}
 Group=${SERVICE_USER}
 WorkingDirectory=${INSTALL_DIR}
+Environment=TT_RELOAD_STATUS_FILE=${RELOAD_STATUS}
 ExecStart=${INSTALL_DIR}/${BIN_NAME} vpn.toml hosts.toml
+ExecReload=/bin/kill -HUP \$MAINPID
 Restart=on-failure
 RestartSec=3
 LimitNOFILE=65536
@@ -676,6 +690,8 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ReadWritePaths=${INSTALL_DIR}
+RuntimeDirectory=${SERVICE_NAME}
+RuntimeDirectoryMode=0750
 ProtectHome=true
 
 [Install]
@@ -701,12 +717,41 @@ write_certbot_hook() {
 set -e
 LIVE="${LE_LIVE}"
 DEST="${CERT_DIR}"
+LOCK="${MANAGER_LOCK}"
+SERVICE="${SERVICE_NAME}.service"
+service_ready() {
+  sleep 1
+  systemctl is-active --quiet "\$SERVICE" || return 1
+  PID="\$(systemctl show --property MainPID --value "\$SERVICE")"
+  case "\$PID" in ''|0|*[!0-9]*) return 1 ;; esac
+  ss -lntp 2>/dev/null | grep -E ':443[[:space:]]' | grep -Fq "pid=\$PID,"
+}
+exec 9>"\$LOCK"
+flock -x 9
+BACKUP="\$(mktemp -d)"
+trap 'rm -rf -- "\$BACKUP"' EXIT
+cp -p "\$DEST/fullchain.pem" "\$BACKUP/fullchain.pem"
+cp -p "\$DEST/privkey.pem" "\$BACKUP/privkey.pem"
 install -d -m 0750 -o root -g ${SERVICE_USER} "\$DEST"
 install -m 0640 -o root -g ${SERVICE_USER} "\$LIVE/fullchain.pem" "\$DEST/fullchain.pem"
 install -m 0640 -o root -g ${SERVICE_USER} "\$LIVE/privkey.pem" "\$DEST/privkey.pem"
-systemctl restart ${SERVICE_NAME}.service
+if ! systemctl restart "\$SERVICE" || ! service_ready; then
+  install -m 0640 -o root -g ${SERVICE_USER} "\$BACKUP/fullchain.pem" "\$DEST/fullchain.pem"
+  install -m 0640 -o root -g ${SERVICE_USER} "\$BACKUP/privkey.pem" "\$DEST/privkey.pem"
+  if ! systemctl restart "\$SERVICE" || ! service_ready; then
+    echo "fatal: failed to restore \$SERVICE with previous certificates" >&2
+  fi
+  exit 1
+fi
 EOF
   chmod 0755 "${LE_HOOK}"
+}
+
+restore_upgrade_integration() {
+  local unit_backup="$1" hook_backup="${2:-}"
+  install -m 0644 "$unit_backup" "${UNIT_PATH}"
+  [[ -z "$hook_backup" ]] || install -m 0755 "$hook_backup" "${LE_HOOK}"
+  systemctl daemon-reload || true
 }
 
 # Resolve certbot binary (snap often not on PATH until new login).
@@ -1037,9 +1082,35 @@ service_restart_check() {
 }
 
 reload_service() {
+  local i status pid_before pid_after
   systemctl cat "${SERVICE_NAME}.service" >/dev/null 2>&1 \
     || die "systemd service ${SERVICE_NAME}.service missing (install first?)"
-  service_restart_check
+  systemctl is-active --quiet "${SERVICE_NAME}.service" \
+    || die "systemd service ${SERVICE_NAME}.service is not active"
+  pid_before="$(systemctl show --property MainPID --value "${SERVICE_NAME}.service")"
+  [[ "$pid_before" =~ ^[1-9][0-9]*$ ]] \
+    || die "cannot determine active ${SERVICE_NAME}.service PID"
+  rm -f "${RELOAD_STATUS}"
+  log "reload endpoint credentials without restarting"
+  systemctl kill --kill-who=main --signal=HUP "${SERVICE_NAME}.service" \
+    || die "failed to signal ${SERVICE_NAME}.service for reload"
+  status=""
+  for ((i = 0; i < 50; i++)); do
+    if [[ -f "${RELOAD_STATUS}" ]]; then
+      status="$(tr -d '[:space:]' <"${RELOAD_STATUS}")"
+      break
+    fi
+    sleep 0.1
+  done
+  [[ "$status" == "ok" ]] \
+    || die "endpoint rejected credentials reload (status=${status:-timeout}; check journalctl -u ${SERVICE_NAME}.service)"
+  systemctl is-active --quiet "${SERVICE_NAME}.service" \
+    || die "service stopped while reloading credentials"
+  pid_after="$(systemctl show --property MainPID --value "${SERVICE_NAME}.service")"
+  [[ "$pid_after" == "$pid_before" ]] \
+    || die "service restarted while reloading credentials (pid ${pid_before} -> ${pid_after})"
+  service_owns_443 \
+    || die "service lost tcp/443 while reloading credentials"
 }
 
 # --- list clients (shared by list-users + status) ---
@@ -1170,8 +1241,8 @@ cmd_install() {
   log "preconditions"
   # apt first (need_cmds would die before we can install curl/ss on a minimal image),
   # then assert every command we actually invoke is on PATH.
-  apt_install curl ca-certificates openssl iproute2
-  need_cmds curl tar install sha256sum find openssl ss useradd id readlink ln mv basename
+  apt_install curl ca-certificates openssl iproute2 util-linux
+  need_cmds curl tar install sha256sum find openssl ss useradd id readlink ln mv basename flock
 
   [[ -n "$icmp_iface" ]] || icmp_iface="$(detect_icmp_interface)"
   validate_icmp_interface "$icmp_iface"
@@ -1245,7 +1316,7 @@ cmd_install() {
 cmd_upgrade() {
   check_os
   local ver="" local_bin="" release_bin="" binary_tag="" release_source=""
-  local current target src_sum current_sum new previous was_active=0
+  local current target src_sum current_sum new previous was_active=0 unit_backup hook_backup
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --version) ver="${2:?}"; shift 2 ;;
@@ -1256,7 +1327,9 @@ cmd_upgrade() {
   done
   [[ -z "$local_bin" || -z "$ver" ]] || die "use only one of --binary or --version"
   is_installed || die "not installed (run install first)"
-  need_cmds install sha256sum readlink ln mv basename dirname systemctl
+  need_cmds install sha256sum readlink ln mv basename dirname systemctl flock
+  acquire_manager_lock
+  [[ -f "${UNIT_PATH}" ]] || die "systemd service file missing (${UNIT_PATH})"
 
   if [[ -n "$local_bin" ]]; then
     [[ -f "$local_bin" ]] || die "binary file not found: $local_bin"
@@ -1281,25 +1354,66 @@ cmd_upgrade() {
     current_sum="$(sha256sum "$current" | awk '{print $1}')"
     [[ "$src_sum" == "$current_sum" ]] \
       || die "current version name collides with different binary content: ${target}"
+    unit_backup="$(mktemp)"
+    cp -p "${UNIT_PATH}" "$unit_backup"
+    hook_backup=""
+    if [[ -f "${LE_HOOK}" ]]; then
+      hook_backup="$(mktemp)"
+      cp -p "${LE_HOOK}" "$hook_backup"
+    fi
+    log "migrate service integration for reload support"
+    if ! (emit_unit && { [[ ! -f "${LE_HOOK}" ]] || write_certbot_hook; } && systemctl daemon-reload); then
+      restore_upgrade_integration "$unit_backup" "$hook_backup"
+      rm -f "$unit_backup" ${hook_backup:+"$hook_backup"}
+      die "failed to migrate ${UNIT_PATH}; previous unit restored"
+    fi
+    if systemctl is-active --quiet "${SERVICE_NAME}.service"; then
+      if ! (service_restart_verify && reload_service); then
+        restore_upgrade_integration "$unit_backup" "$hook_backup"
+        (service_restart_verify) >/dev/null 2>&1 || true
+        rm -f "$unit_backup" ${hook_backup:+"$hook_backup"}
+        die "endpoint failed after unit migration; previous unit restored"
+      fi
+    fi
+    rm -f "$unit_backup" ${hook_backup:+"$hook_backup"}
     [[ -z "$release_bin" ]] || rm -rf "$(dirname "$release_bin")"
     write_release_meta "$release_source" "${ver:-local}" "$current"
     echo "OK upgrade — already current: $(basename "$current")"
     return 0
   fi
 
-  log "upgrade binary only"
+  log "upgrade binary and migrate service definition"
   binary_tx_begin
   trap 'binary_tx_on_exit "$?"' EXIT
   binary_tx_install "$local_bin" "$binary_tag"
   [[ -z "$release_bin" ]] || rm -rf "$(dirname "$release_bin")"
 
+  unit_backup="$(mktemp)"
+  cp -p "${UNIT_PATH}" "$unit_backup"
+  hook_backup=""
+  if [[ -f "${LE_HOOK}" ]]; then
+    hook_backup="$(mktemp)"
+    cp -p "${LE_HOOK}" "$hook_backup"
+  fi
+  log "migrate service integration for reload support"
+  if ! (emit_unit && { [[ ! -f "${LE_HOOK}" ]] || write_certbot_hook; } && systemctl daemon-reload); then
+    restore_upgrade_integration "$unit_backup" "$hook_backup"
+    rm -f "$unit_backup" ${hook_backup:+"$hook_backup"}
+    die "failed to migrate ${UNIT_PATH}; previous unit restored"
+  fi
+
   if [[ "$_BIN_TX_SERVICE_WAS_ACTIVE" -eq 1 ]]; then
     was_active=1
     log "restart active endpoint"
-    service_restart_verify
+    if ! (service_restart_verify && reload_service); then
+      restore_upgrade_integration "$unit_backup" "$hook_backup"
+      rm -f "$unit_backup" ${hook_backup:+"$hook_backup"}
+      die "upgraded endpoint failed; previous unit restored"
+    fi
   else
     log "endpoint inactive — leave inactive"
   fi
+  rm -f "$unit_backup" ${hook_backup:+"$hook_backup"}
 
   write_release_meta "$release_source" "${ver:-local}" "$(binary_link_path)"
   new="$_BIN_TX_NEW"
@@ -1315,6 +1429,7 @@ cmd_add_user() {
   local name="${1:-}" pass endpoint sni client_path
   [[ -n "$name" && -z "${2:-}" ]] || die "usage: $0 add-user <name>"
   is_installed || die "not installed (run install first)"
+  acquire_manager_lock
   load_upstream_protocol
   need_cmds openssl install
   validate_username "$name"
@@ -1352,15 +1467,31 @@ cmd_add_user() {
 }
 
 cmd_del_user() {
-  local name="${1:-}" cfile
+  local name="${1:-}" cfile backup
   [[ -n "$name" && -z "${2:-}" ]] || die "usage: $0 del-user <name>"
   is_installed || die "not installed"
+  acquire_manager_lock
   validate_username "$name"
-  creds_del "$name"
+  backup="$(mktemp -d)"
+  trap 'rm -rf -- "$backup"' EXIT
+  cp -p "${CREDS}" "${backup}/credentials.toml"
   cfile="${CLIENTS_DIR}/${name}.toml"
+  [[ ! -f "$cfile" ]] || cp -p "$cfile" "${backup}/client.toml"
+  creds_del "$name"
   rm -f "$cfile"
   log "deleted ${cfile} (if it existed)"
-  reload_service
+  if ! (reload_service); then
+    log "del-user failed; restoring ${name}"
+    install -m 0640 -o root -g "${SERVICE_USER}" \
+      "${backup}/credentials.toml" "${CREDS}"
+    [[ ! -f "${backup}/client.toml" ]] \
+      || install -m 0600 -o root -g root "${backup}/client.toml" "$cfile"
+    (reload_service) \
+      || log "warning: service did not recover after restoring ${name}"
+    die "service failed after deleting ${name}; credentials restored"
+  fi
+  rm -rf "$backup"
+  trap - EXIT
   echo "OK deleted user=${name}"
 }
 
@@ -1519,6 +1650,13 @@ cmd_status() {
 
   echo "[systemd]"
   [[ -f "${UNIT_PATH}" ]] && _st_ok "service file ${UNIT_PATH}" || _st_fail "service file missing"
+  if [[ -f "${UNIT_PATH}" ]] \
+    && grep -Fqx "Environment=TT_RELOAD_STATUS_FILE=${RELOAD_STATUS}" "${UNIT_PATH}" \
+    && grep -Fqx 'ExecReload=/bin/kill -HUP $MAINPID' "${UNIT_PATH}"; then
+    _st_ok "credential hot-reload integration configured"
+  else
+    _st_fail "credential hot-reload integration missing (run: $0 upgrade)"
+  fi
   local en act main_pid
   en="$(systemctl is-enabled "${SERVICE_NAME}.service" 2>/dev/null || true)"
   act="$(systemctl is-active "${SERVICE_NAME}.service" 2>/dev/null || true)"
@@ -1624,6 +1762,7 @@ cmd_status() {
 }
 
 cmd_disable() {
+  acquire_manager_lock
   [[ -f "${UNIT_PATH}" ]] || die "systemd service file missing (${UNIT_PATH}) — not installed?"
   log "disable ${SERVICE_NAME}"
   systemctl stop "${SERVICE_NAME}.service" 2>/dev/null || true
@@ -1635,6 +1774,7 @@ cmd_disable() {
 }
 
 cmd_enable() {
+  acquire_manager_lock
   [[ -f "${UNIT_PATH}" ]] || die "systemd service file missing (${UNIT_PATH}) — run install first"
   [[ -x "${INSTALL_DIR}/${BIN_NAME}" ]] || die "binary missing — run install first"
   log "enable ${SERVICE_NAME}"
@@ -1649,6 +1789,7 @@ cmd_enable() {
 
 cmd_rollback() {
   local current previous was_active=0
+  acquire_manager_lock
   current="$(binary_resolve_link)" \
     || die "managed binary symlink missing or invalid — run install first"
   previous="$(binary_previous "$current")" \
@@ -1678,6 +1819,8 @@ cmd_purge() {
   # Intentionally NOT reversed (reported under KEPT): apt pkgs, snap/certbot, LE live, ufw.
   local left=0 ufw_line certbot_path process_pids process_status
   local service_state systemctl_status
+
+  acquire_manager_lock
 
   log "purge ${SERVICE_NAME} (reverse install)"
 
