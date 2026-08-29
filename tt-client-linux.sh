@@ -3,13 +3,17 @@
 # Local-machine only: no UCI, netifd, LAN forwarding, or router state.
 set -eu
 
-VERSION_SCRIPT="0.1.2"
+VERSION_SCRIPT="0.1.4"
 TT_DIR="/etc/moreprivate/tt-client"
 CLIENT_TOML="${TT_DIR}/client.toml"
 DIRECT_CONF="${TT_DIR}/direct.conf"
 RELEASE_META="${TT_DIR}/release.env"
 RESOLV_BACKUP="${TT_DIR}/resolv.conf.original"
 RESOLV_CONF="/etc/resolv.conf"
+RESOLVED_STATE="${TT_DIR}/resolved.state"
+HOST_DNS_STATE="${TT_DIR}/dns-takeover.state"
+NM_DNS_CONF="/etc/NetworkManager/conf.d/moreprivate-tt-client.conf"
+HOST_DNS_UNITS="systemd-resolved.service dnsmasq.service unbound.service named.service bind9.service"
 DNSMASQ_CONF="${TT_DIR}/dnsmasq.conf"
 DNSMASQ_PID="${TT_DIR}/dnsmasq.pid"
 POLICY="/usr/local/libexec/moreprivate-tt-client-policy"
@@ -54,7 +58,9 @@ DESCRIPTION
     All local IPv4 traffic is fail-closed into MorePrivate tt-client. Only the configured
     endpoint TCP address and port use the ordinary uplink. No LAN forwarding,
     router firewall, or OpenWrt state is touched. A dedicated dnsmasq instance
-    owns 127.0.0.1:53 and forwards DNS through the tunnel.
+    owns 127.0.0.1:53 and forwards DNS through the tunnel. systemd-resolved and
+    any other host resolver on UDP/53 are stopped so NSS cannot bypass that
+    listener.
     LIST values accept commas or whitespace. Config: upstream_protocol auto|http2|http3
     (profiles from add-user default to http3). status reports live H2/H3 via ss.
 
@@ -207,33 +213,174 @@ write_client_config() {
   chmod 600 "$tmp"; mv -f "$tmp" "$CLIENT_TOML"
 }
 
+port53_lines() {
+  ss -ulnp 2>/dev/null | awk '$0 ~ /[.:]53([ \t]|$)/ {print}'
+}
+
+port53_busy() {
+  port53_lines | grep -Eq '(^|[[:space:]])([0-9.]+:53|\[::\]:53|\*:53|:::53)[[:space:]]'
+}
+
+nm_reload() {
+  if command -v nmcli >/dev/null 2>&1; then
+    nmcli general reload >/dev/null 2>&1 || true
+  fi
+  systemctl reload NetworkManager.service >/dev/null 2>&1 || true
+}
+
+record_dns_unit() {
+  local unit="$1" active enabled
+  [ -f "$HOST_DNS_STATE" ] || : >"$HOST_DNS_STATE"
+  awk -v u="$unit" '$1=="UNIT" && $2==u {found=1} END{exit found?0:1}' "$HOST_DNS_STATE" 2>/dev/null && return 0
+  active="$(systemctl is-active "$unit" 2>/dev/null || true)"
+  enabled="$(systemctl is-enabled "$unit" 2>/dev/null || true)"
+  printf 'UNIT %s %s %s\n' "$unit" "$active" "$enabled" >>"$HOST_DNS_STATE"
+}
+
+stop_foreign_dnsmasq() {
+  local pid="" exe="" our=""
+  our="$(systemctl show -p MainPID --value "$DNSMASQ_SERVICE_NAME.service" 2>/dev/null || true)"
+  for pid in $(port53_lines | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p'); do
+    [ -n "$pid" ] || continue
+    [ "$pid" = "${our:-0}" ] && continue
+    exe="$(readlink "/proc/${pid}/exe" 2>/dev/null || true)"
+    exe="${exe% (deleted)}"
+    case "$exe" in
+      */dnsmasq)
+        kill "$pid" 2>/dev/null || true
+        ;;
+    esac
+  done
+}
+
+stop_host_dns_unit() {
+  local unit="$1" enabled=""
+  systemctl cat "$unit" >/dev/null 2>&1 || return 0
+  record_dns_unit "$unit"
+  enabled="$(systemctl is-enabled "$unit" 2>/dev/null || true)"
+  if [ "$unit" = systemd-resolved.service ]; then
+    if [ "$enabled" != masked ]; then
+      systemctl disable --now "$unit" >/dev/null 2>&1 || true
+      systemctl mask "$unit" >/dev/null 2>&1 || true
+    else
+      systemctl stop "$unit" >/dev/null 2>&1 || true
+    fi
+    return 0
+  fi
+  systemctl stop "$unit" >/dev/null 2>&1 || true
+  if [ "$enabled" != masked ]; then
+    systemctl disable "$unit" >/dev/null 2>&1 || true
+  fi
+}
+
+takeover_host_dns() {
+  local unit="" i=0
+  if [ -d /etc/NetworkManager/conf.d ]; then
+    printf '%s\n' '[main]' 'dns=none' 'rc-manager=unmanaged' >"$NM_DNS_CONF"
+    [ -f "$HOST_DNS_STATE" ] || : >"$HOST_DNS_STATE"
+    grep -q '^NM_TOUCHED=' "$HOST_DNS_STATE" 2>/dev/null || printf 'NM_TOUCHED=1\n' >>"$HOST_DNS_STATE"
+    nm_reload
+  fi
+  for unit in $HOST_DNS_UNITS; do
+    stop_host_dns_unit "$unit"
+  done
+  stop_foreign_dnsmasq
+  if command -v nscd >/dev/null 2>&1; then
+    nscd -i hosts >/dev/null 2>&1 || true
+  fi
+  chmod 600 "$HOST_DNS_STATE" 2>/dev/null || true
+  while port53_busy && [ "$i" -lt 8 ]; do
+    stop_foreign_dnsmasq
+    i=$((i+1)); sleep 1
+  done
+}
+
 configure_resolver() {
   local tmp="${RESOLV_CONF}.moreprivate.$$"
   [ -e "$RESOLV_BACKUP" ] || cp -a "$RESOLV_CONF" "$RESOLV_BACKUP" 2>/dev/null || true
+  # Stop other resolvers before replacing resolv.conf: systemd-resolved stop
+  # hooks may restore the stub symlink, and a host dnsmasq on *:53 will
+  # prevent the managed listener from binding 127.0.0.1:53.
+  takeover_host_dns
   printf '%s\n' '# Managed by MorePrivate tt-client; restored on purge' \
-    'nameserver 127.0.0.1' >"$tmp"
+    'nameserver 127.0.0.1' \
+    'options timeout:2 attempts:2' >"$tmp"
   chmod 644 "$tmp"
   rm -f "$RESOLV_CONF"
   mv -f "$tmp" "$RESOLV_CONF"
+  if port53_busy; then
+    echo "error: UDP port 53 is already in use:" >&2
+    port53_lines >&2 || true
+    die "cannot bind the managed resolver on 127.0.0.1:53"
+  fi
 }
 
 write_dnsmasq() {
+  local srv=""
   DNSMASQ_BIN="$(command -v dnsmasq 2>/dev/null || true)"
   [ -n "$DNSMASQ_BIN" ] || die "dnsmasq is required for the Linux host resolver"
-  cat >"$DNSMASQ_CONF" <<EOF
-listen-address=127.0.0.1
-bind-interfaces
-no-resolv
-no-hosts
-server=1.1.1.1
-server=1.0.0.1
-pid-file=$DNSMASQ_PID
-EOF
+  {
+    printf '%s\n' \
+      'listen-address=127.0.0.1' \
+      'bind-interfaces' \
+      'interface=lo' \
+      'no-resolv' \
+      'no-hosts'
+    for srv in $TUNNEL_DNS_SERVERS_DEFAULT; do
+      printf 'server=%s\n' "$srv"
+    done
+    printf 'pid-file=%s\n' "$DNSMASQ_PID"
+  } >"$DNSMASQ_CONF"
   chmod 600 "$DNSMASQ_CONF"
 }
 
 restore_resolver() {
   [ -e "$RESOLV_BACKUP" ] && mv -f "$RESOLV_BACKUP" "$RESOLV_CONF" || true
+}
+
+restore_host_dns() {
+  local kind unit active enabled
+  rm -f "$NM_DNS_CONF"
+  if [ -f "$HOST_DNS_STATE" ]; then
+    while read -r kind unit active enabled; do
+      case "$kind" in
+        UNIT)
+          [ -n "$unit" ] || continue
+          if [ "$unit" = systemd-resolved.service ] && [ "${enabled:-}" != masked ]; then
+            systemctl unmask "$unit" >/dev/null 2>&1 || true
+          fi
+          case "${enabled:-}" in
+            enabled|enabled-runtime) systemctl enable "$unit" >/dev/null 2>&1 || true ;;
+          esac
+          case "${active:-}" in
+            active|activating) systemctl start "$unit" >/dev/null 2>&1 || true ;;
+          esac
+          ;;
+        NM_TOUCHED=*)
+          nm_reload
+          ;;
+      esac
+    done <"$HOST_DNS_STATE"
+    rm -f "$HOST_DNS_STATE"
+  fi
+  if [ -f "$RESOLVED_STATE" ]; then
+    RESOLVED_ACTIVE=""
+    RESOLVED_ENABLED=""
+    # Saved as KEY=value lines written by this script (0.1.3 leftover).
+    # shellcheck disable=SC1090
+    . "$RESOLVED_STATE"
+    if [ "${RESOLVED_ENABLED:-}" != masked ]; then
+      systemctl unmask systemd-resolved.service >/dev/null 2>&1 || true
+    fi
+    case "${RESOLVED_ENABLED:-}" in
+      enabled|enabled-runtime) systemctl enable systemd-resolved.service >/dev/null 2>&1 || true ;;
+    esac
+    case "${RESOLVED_ACTIVE:-}" in
+      active|activating) systemctl start systemd-resolved.service >/dev/null 2>&1 || true ;;
+    esac
+    rm -f "$RESOLVED_STATE"
+  fi
+  restore_resolver
 }
 
 write_policy() {
@@ -269,7 +416,12 @@ NFT
     ip rule del priority $((MARK_PRIO + 1)) 2>/dev/null || true
     ip rule add priority $((MARK_PRIO + 1)) unreachable
     if [ "\$mode" = full ] && ip link show tun0 >/dev/null 2>&1; then
-      ip route replace default dev tun0 table "\$TABLE"
+      tun_src="\$(ip -4 -o addr show dev tun0 2>/dev/null | awk '{print \$4; exit}' | cut -d/ -f1)"
+      if [ -n "\$tun_src" ]; then
+        ip route replace default dev tun0 src "\$tun_src" table "\$TABLE"
+      else
+        ip route replace default dev tun0 table "\$TABLE"
+      fi
       ip rule del priority $((MARK_PRIO + 1)) 2>/dev/null || true
       ip rule add priority $((MARK_PRIO + 1)) lookup "\$TABLE"
     fi
@@ -334,6 +486,7 @@ EOF
 Description=MorePrivate local DNS forwarder
 After=$SERVICE_NAME.service
 Requires=$SERVICE_NAME.service
+Conflicts=systemd-resolved.service dnsmasq.service unbound.service named.service bind9.service
 
 [Service]
 Type=simple
@@ -355,19 +508,101 @@ wait_tunnel() {
   return 1
 }
 
+# Query the managed 127.0.0.1 resolver directly. getent/NSS often hits
+# systemd-resolved (127.0.0.53) and never reaches dnsmasq.
+lookup_tunnel_dns() {
+  local name="$1" out=""
+  if command -v python3 >/dev/null 2>&1; then
+    out="$(NAME="$name" timeout 4s python3 - <<'PY' 2>/dev/null || true
+import os, socket, struct, sys
+name = os.environ.get("NAME", "")
+def encode(n):
+    out = b""
+    for lab in n.strip(".").split("."):
+        b = lab.encode("idna")
+        out += bytes([len(b)]) + b
+    return out + b"\x00"
+q = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00" + encode(name) + b"\x00\x01\x00\x01"
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.settimeout(3)
+s.sendto(q, ("127.0.0.1", 53))
+data, _ = s.recvfrom(4096)
+if len(data) < 12:
+    sys.exit(1)
+if (data[3] & 0x0F) != 0 or struct.unpack("!H", data[6:8])[0] < 1:
+    sys.exit(1)
+i = 12
+while i < len(data) and data[i]:
+    if data[i] & 0xC0 == 0xC0:
+        i += 2
+        break
+    i += 1 + data[i]
+else:
+    i += 1
+i += 4
+anc = struct.unpack("!H", data[6:8])[0]
+for _ in range(anc):
+    if i >= len(data):
+        sys.exit(1)
+    if data[i] & 0xC0 == 0xC0:
+        i += 2
+    else:
+        while i < len(data) and data[i]:
+            i += 1 + data[i]
+        i += 1
+    if i + 10 > len(data):
+        sys.exit(1)
+    typ, _cls, _ttl, rdlen = struct.unpack("!HHIH", data[i:i + 10])
+    i += 10
+    if typ == 1 and rdlen == 4:
+        print(socket.inet_ntoa(data[i:i + 4]))
+        sys.exit(0)
+    i += rdlen
+sys.exit(1)
+PY
+)"
+    [ -n "$out" ] && { echo "$out"; return 0; }
+  fi
+  if command -v dig >/dev/null 2>&1; then
+    out="$(timeout 4s dig +time=2 +tries=1 +short A "$name" @127.0.0.1 2>/dev/null | awk '/^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/{print; exit}')" || true
+    [ -n "$out" ] && { echo "$out"; return 0; }
+  fi
+  if command -v nslookup >/dev/null 2>&1; then
+    out="$(timeout 4s nslookup "$name" 127.0.0.1 2>/dev/null | awk '/^Name:/{n=1; next} n && /Address/{print $NF; exit}')" || true
+    echo "$out" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' || out=""
+    [ -n "$out" ] && { echo "$out"; return 0; }
+  fi
+  out="$(timeout 4s getent ahostsv4 "$name" 2>/dev/null | awk '/^[0-9]+\./{print $1; exit}')" || true
+  [ -n "$out" ] && { echo "$out"; return 0; }
+  return 1
+}
+
+dns_debug() {
+  echo "  dns debug: resolv.conf=$(tr '\n' ' ' <"$RESOLV_CONF" 2>/dev/null)" >&2
+  echo "  dns debug: systemd-resolved=$(systemctl is-active systemd-resolved.service 2>/dev/null || true) dnsmasq=$(systemctl is-active "$DNSMASQ_SERVICE_NAME.service" 2>/dev/null || true)" >&2
+  echo "  dns debug: route 1.1.1.1=$(ip route get 1.1.1.1 2>/dev/null | tr '\n' ' ')" >&2
+  ss -ulnp 2>/dev/null | awk '/:53 /{print "  dns debug: listen "$0}' >&2 || true
+  journalctl -u "$DNSMASQ_SERVICE_NAME.service" -n 20 --no-pager >&2 || true
+}
+
 verify() {
-  local vps="$1" route ipout dns numeric_ip hostname_ip
+  local vps="$1" route dns_route dns numeric_ip hostname_ip
   ip link show tun0 >/dev/null 2>&1 || die "tun0 is not present"
   route="$(ip route get "$vps" 2>/dev/null)"
   echo "$route" | grep -q 'dev tun0' || die "endpoint non-marked traffic is not routed through tun0: $route"
+  dns_route="$(ip route get 1.1.1.1 2>/dev/null)"
+  echo "$dns_route" | grep -q 'dev tun0' || die "tunnel DNS server 1.1.1.1 is not routed through tun0: $dns_route"
   echo "  check DNS resolution"
   dns=""
   for _ in 1 2 3 4 5 6 7 8 9 10; do
-    dns="$(timeout 3s getent hosts google.com 2>/dev/null | head -1 || true)"
+    dns="$(lookup_tunnel_dns google.com || true)"
     [ -n "$dns" ] && break
     sleep 1
   done
-  [ -n "$dns" ] || die "DNS validation failed: google.com cannot be resolved through the tunnel"
+  if [ -z "$dns" ]; then
+    dns_debug
+    die "DNS validation failed: google.com cannot be resolved through the tunnel"
+  fi
   echo "  dns: ok ($dns)"
   command -v curl >/dev/null 2>&1 || die "curl is required for egress validation"
   echo "  check numeric Cloudflare egress"
@@ -403,6 +638,13 @@ guard_start() {
   fi
 }
 dnsmasq_start() {
+  local i=0 state=""
+  if port53_busy; then
+    echo "error: UDP port 53 is already in use:" >&2
+    port53_lines >&2 || true
+    echo "error: $DNSMASQ_SERVICE_NAME.service cannot bind 127.0.0.1:53" >&2
+    return 1
+  fi
   systemctl enable "$DNSMASQ_SERVICE_NAME.service" >/dev/null
   echo "==> start $DNSMASQ_SERVICE_NAME.service"
   if ! timeout 30s systemctl start "$DNSMASQ_SERVICE_NAME.service"; then
@@ -411,6 +653,22 @@ dnsmasq_start() {
     journalctl -u "$DNSMASQ_SERVICE_NAME.service" -n 40 --no-pager >&2 || true
     return 1
   fi
+  while [ "$i" -lt 15 ]; do
+    state="$(systemctl is-active "$DNSMASQ_SERVICE_NAME.service" 2>/dev/null || true)"
+    if [ "$state" = active ] && command -v ss >/dev/null 2>&1 \
+      && ss -uln 2>/dev/null | grep -Eq '(127\.0\.0\.1|0\.0\.0\.0|\*):53[[:space:]]'; then
+      return 0
+    fi
+    if [ "$state" = failed ]; then
+      break
+    fi
+    i=$((i+1)); sleep 1
+  done
+  echo "error: $DNSMASQ_SERVICE_NAME.service did not become ready on 127.0.0.1:53 (state=${state:-unknown})" >&2
+  systemctl status "$DNSMASQ_SERVICE_NAME.service" --no-pager -l >&2 || true
+  journalctl -u "$DNSMASQ_SERVICE_NAME.service" -n 40 --no-pager >&2 || true
+  port53_lines >&2 || true
+  return 1
 }
 dnsmasq_stop() { systemctl stop "$DNSMASQ_SERVICE_NAME.service" >/dev/null 2>&1 || true; }
 service_stop() {
@@ -441,7 +699,7 @@ cmd_install() {
   local config="" binary="" tag="" src source vps port uplink
   while [ "$#" -gt 0 ]; do case "$1" in --config) config="$2"; shift 2;; --binary) binary="$2"; shift 2;; --version) tag="$2"; shift 2;; *) die "unknown install option: $1";; esac; done
   [ -n "$config" ] || die "install requires --config FILE"; [ ! -e "$CLIENT_TOML" ] || die "already installed; use upgrade or purge"
-  trap 'rc=$?; if [ "$rc" -ne 0 ]; then dnsmasq_stop; systemctl stop "$SERVICE_NAME.service" >/dev/null 2>&1 || true; systemctl disable "$SERVICE_NAME.service" "$GUARD_SERVICE_NAME.service" "$DNSMASQ_SERVICE_NAME.service" >/dev/null 2>&1 || true; "$POLICY" stop >/dev/null 2>&1 || true; restore_resolver; rm -f "$INIT" "$GUARD_INIT" "$DNSMASQ_INIT" "$DNSMASQ_CONF" "$DNSMASQ_PID" "$POLICY" "$CLIENT_TOML" "$DIRECT_CONF" "$RELEASE_META" "$BIN"; rm -f /usr/local/bin/tt-client-*-linux-*; systemctl daemon-reload >/dev/null 2>&1 || true; fi; exit "$rc"' EXIT
+  trap 'rc=$?; if [ "$rc" -ne 0 ]; then dnsmasq_stop; systemctl stop "$SERVICE_NAME.service" >/dev/null 2>&1 || true; systemctl disable "$SERVICE_NAME.service" "$GUARD_SERVICE_NAME.service" "$DNSMASQ_SERVICE_NAME.service" >/dev/null 2>&1 || true; "$POLICY" stop >/dev/null 2>&1 || true; restore_host_dns; rm -f "$INIT" "$GUARD_INIT" "$DNSMASQ_INIT" "$DNSMASQ_CONF" "$DNSMASQ_PID" "$POLICY" "$CLIENT_TOML" "$DIRECT_CONF" "$RELEASE_META" "$BIN"; rm -f /usr/local/bin/tt-client-*-linux-*; systemctl daemon-reload >/dev/null 2>&1 || true; fi; exit "$rc"' EXIT
   need_file "$config"; mkdir -p "$TT_DIR" /usr/local/libexec
   vps="$(parse_vps_ip "$config")"; port="$(parse_vps_port "$config")"; uplink="$(uplink_dev "$vps")"; [ -n "$uplink" ] || die "cannot determine uplink for endpoint"
   # Resolve/download a release while the host resolver is still intact.  The
@@ -451,7 +709,10 @@ cmd_install() {
   configure_resolver
   write_client_config "$config"; install_binary "$src" "$tag"; write_policy "$vps" "$port" "$uplink"; write_dnsmasq; write_units; save_meta "$source" "$tag"
   systemctl daemon-reload; guard_start; service_start
-  echo "==> wait for tun0"; wait_tunnel || die "MorePrivate tt-client did not create tun0"; dnsmasq_start; echo "==> validate DNS and egress"; verify "$vps"; trap - EXIT; log "install complete"
+  echo "==> wait for tun0"; wait_tunnel || die "MorePrivate tt-client did not create tun0"
+  # ExecStartPost may run before tun0 exists; apply the tunnel table now.
+  "$POLICY" full
+  dnsmasq_start; echo "==> validate DNS and egress"; verify "$vps"; trap - EXIT; log "install complete"
 }
 
 cmd_upgrade() {
@@ -461,11 +722,12 @@ cmd_upgrade() {
   OLD_BIN="$(readlink -f "$BIN")"; NEW_BIN=""; trap upgrade_rollback EXIT
   vps="$(parse_vps_ip "$CLIENT_TOML")"; port="$(parse_vps_port "$CLIENT_TOML")"; uplink="$(uplink_dev "$vps")"
   if [ -n "$binary" ]; then src="$binary"; source=local; tag="${tag:-$(binary_tag_from_file "$binary")}"; else tag="${tag:-$(latest_tag)}"; src="$(download_binary "$tag")"; source="github:${GITHUB_REPO}"; fi
-  service_stop; configure_resolver; install_binary "$src" "$tag"; NEW_BIN="$(readlink -f "$BIN")"; write_policy "$vps" "$port" "$uplink"; write_dnsmasq; write_units; save_meta "$source" "$tag"; systemctl daemon-reload; service_start; wait_tunnel || die "upgrade did not restore tun0"; dnsmasq_start; verify "$vps"; trap - EXIT
+  service_stop; configure_resolver; install_binary "$src" "$tag"; NEW_BIN="$(readlink -f "$BIN")"; write_policy "$vps" "$port" "$uplink"; write_dnsmasq; write_units; save_meta "$source" "$tag"; systemctl daemon-reload; service_start; wait_tunnel || die "upgrade did not restore tun0"; "$POLICY" full; dnsmasq_start; verify "$vps"; trap - EXIT
 }
 
 cmd_update_creds() { local cfg="$2"; [ "$1" = --config ] || die "update-creds requires --config FILE"; write_client_config "$cfg"; service_restart; }
 cmd_enable() {
+  configure_resolver
   systemctl enable --now "$SERVICE_NAME.service"
   # dnsmasq Requires=$SERVICE_NAME.service and is therefore stopped when the
   # client is disabled; bring it back explicitly so 127.0.0.1 remains live.
@@ -511,6 +773,15 @@ cmd_status() {
   esac
   ip rule show | grep -q "$MARK_PRIO" && echo "  ok    endpoint mark rule" || echo "  FAIL endpoint mark rule"
   ip route show table "$TUN_TABLE" 2>/dev/null | grep -q tun0 && echo "  ok    default route via tun0" || echo "  FAIL tunnel default route"
+  grep -q 'nameserver 127.0.0.1' "$RESOLV_CONF" 2>/dev/null && echo "  ok    resolv.conf -> 127.0.0.1" || echo "  FAIL resolv.conf is not the managed resolver"
+  if systemctl is-active "$DNSMASQ_SERVICE_NAME.service" >/dev/null 2>&1; then
+    echo "  ok    $DNSMASQ_SERVICE_NAME.service"
+  else
+    echo "  FAIL $DNSMASQ_SERVICE_NAME.service"
+  fi
+  if systemctl cat systemd-resolved.service >/dev/null 2>&1 && systemctl is-active systemd-resolved.service >/dev/null 2>&1; then
+    echo "  warn  systemd-resolved is active (NSS may bypass 127.0.0.1)"
+  fi
   if [ "$active" = 1 ] && [ -n "$vps" ] && [ -n "$port" ] && command -v ss >/dev/null 2>&1; then
     tcp_n="$(ss -tn 2>/dev/null | awk -v n="${vps}:${port}" '$1~/ESTAB/ && index($0,n){c++} END{print c+0}')"
     udp_n="$(ss -un 2>/dev/null | awk -v n="${vps}:${port}" '$1~/ESTAB/ && index($0,n){c++} END{print c+0}')"
@@ -527,7 +798,7 @@ cmd_status() {
     echo "  info  live transport: not tested (ss/endpoint missing)"
   fi
 }
-cmd_purge() { dnsmasq_stop; service_stop; systemctl disable "$SERVICE_NAME.service" "$GUARD_SERVICE_NAME.service" "$DNSMASQ_SERVICE_NAME.service" >/dev/null 2>&1 || true; systemctl daemon-reload; "$POLICY" stop 2>/dev/null || true; restore_resolver; rm -f "$INIT" "$GUARD_INIT" "$DNSMASQ_INIT" "$DNSMASQ_CONF" "$DNSMASQ_PID" "$POLICY" "$CLIENT_TOML" "$DIRECT_CONF" "$RELEASE_META" "$BIN"; rm -f /usr/local/bin/tt-client-*-linux-*; rmdir "$TT_DIR" 2>/dev/null || true; systemctl daemon-reload; log "purged TT-owned local state"; }
+cmd_purge() { dnsmasq_stop; service_stop; systemctl disable "$SERVICE_NAME.service" "$GUARD_SERVICE_NAME.service" "$DNSMASQ_SERVICE_NAME.service" >/dev/null 2>&1 || true; systemctl daemon-reload; "$POLICY" stop 2>/dev/null || true; restore_host_dns; rm -f "$INIT" "$GUARD_INIT" "$DNSMASQ_INIT" "$DNSMASQ_CONF" "$DNSMASQ_PID" "$POLICY" "$CLIENT_TOML" "$DIRECT_CONF" "$RELEASE_META" "$BIN"; rm -f /usr/local/bin/tt-client-*-linux-*; rmdir "$TT_DIR" 2>/dev/null || true; systemctl daemon-reload; log "purged TT-owned local state"; }
 
 cmd="${1:-help}"
 [ "$#" -eq 0 ] || shift
